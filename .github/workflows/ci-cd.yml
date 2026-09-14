@@ -158,6 +158,25 @@ jobs:
             -Dsonar.javascript.lcov.reportPaths=client/coverage/lcov.info,services/catalog-service/coverage/lcov.info,services/user-service/coverage/lcov.info,services/order-service/coverage/lcov.info,services/notification-service/coverage/lcov.info,services/api-gateway/coverage/lcov.info
             -Dsonar.exclusions=**/__tests__/**,**/node_modules/**,client/build/**
 
+  test-lambdas:
+    name: "🧪 Test AIOps RCA Lambdas"
+    runs-on: ubuntu-latest
+    needs: secret-scan
+    strategy:
+      matrix:
+        lambda: [rca-lambda, dashboard-read-lambda]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        working-directory: lambdas/${{ matrix.lambda }}
+        run: pip install -r requirements-dev.txt
+      - name: Run tests
+        working-directory: lambdas/${{ matrix.lambda }}
+        run: python -m pytest tests/ -v
+
   # ─────────────────────────────────────────────────────────────────────────
   # STAGE 2 · Manifest Validation
   # K8s manifests must be structurally valid.
