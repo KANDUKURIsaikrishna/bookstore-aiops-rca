@@ -447,7 +447,7 @@ receivers:
     #     text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ "\n" }}{{ end }}'
     #     send_resolved: true
     webhook_configs:
-      - url: 'http://localhost:5001/'
+      - url: '${rca_webhook_url}/webhook'
         send_resolved: true
     email_configs:
       - to: '$SMTP_TO'
@@ -457,7 +457,7 @@ receivers:
 
   - name: 'critical-webhook'
     webhook_configs:
-      - url: 'http://localhost:5001/'
+      - url: '${rca_webhook_url}/webhook'
         send_resolved: true
     email_configs:
       - to: '$SMTP_TO'

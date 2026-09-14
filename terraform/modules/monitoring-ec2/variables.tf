@@ -86,3 +86,13 @@ variable "instance_type" {
   type        = string
   default     = "t3.small"
 }
+
+variable "rca_lambda_sg_id" {
+  description = "Security group ID of the RCA Lambda -- granted ingress on 3100 to query Loki"
+  type        = string
+}
+
+variable "rca_webhook_url" {
+  description = "RCA Lambda's API Gateway invoke URL -- Alertmanager POSTs alerts here"
+  type        = string
+}

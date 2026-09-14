@@ -323,6 +323,38 @@ module "monitoring_ec2" {
   # it, so without this the instance could boot and fetch the secret before
   # the SMTP password has been written.
   depends_on = [null_resource.ses_smtp_password]
+
+  rca_lambda_sg_id = module.aiops_rca.lambda_security_group_id
+  rca_webhook_url  = module.aiops_rca.webhook_invoke_url
+}
+
+module "aiops_rca" {
+  source = "./modules/aiops-rca"
+
+  vpc_id            = module.network.vpc_id
+  lambda_subnet_ids = [module.network.private_subnet_ids[4], module.network.private_subnet_ids[5]]
+  ses_identity_arn  = aws_sesv2_email_identity.alerts.arn
+  alert_email       = var.alert_email
+  region            = var.aws_region
+  account_id        = data.aws_caller_identity.current.account_id
+}
+
+resource "aws_api_gateway_rest_api_policy" "rca_webhook" {
+  rest_api_id = module.aiops_rca.webhook_rest_api_id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = "*"
+      Action    = "execute-api:Invoke"
+      Resource  = "${module.aiops_rca.webhook_rest_api_arn}/*/*/*"
+      Condition = {
+        IpAddress = {
+          "aws:SourceIp" = ["${module.monitoring_ec2.instance_public_ip}/32"]
+        }
+      }
+    }]
+  })
 }
 
 # ── EKS Add-ons ────────────────────────────────────────────────────────────────
