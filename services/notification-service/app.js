@@ -89,3 +89,5 @@ export function createApp(db) {
 
   return app;
 }
+
+export { logger };

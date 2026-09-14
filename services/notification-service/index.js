@@ -1,6 +1,6 @@
 import mysql from "mysql2";
 import dotenv from "dotenv";
-import { createApp } from "./app.js";
+import { createApp, logger } from "./app.js";
 
 dotenv.config();
 
@@ -19,5 +19,5 @@ const db = mysql.createPool({
 const app = createApp(db);
 const APP_PORT = process.env.APP_PORT || 3000;
 app.listen(APP_PORT, () => {
-  console.log(`notification-service listening on port ${APP_PORT}.`);
+  logger.info("startup", { message: `notification-service listening on port ${APP_PORT}.` });
 });

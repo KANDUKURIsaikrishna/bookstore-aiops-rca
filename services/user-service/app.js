@@ -343,3 +343,5 @@ export function createApp(db, jwtSecret) {
 
   return app;
 }
+
+export { logger };

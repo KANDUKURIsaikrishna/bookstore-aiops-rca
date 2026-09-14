@@ -263,3 +263,5 @@ export function createApp(db, notifyFn) {
 
   return app;
 }
+
+export { logger };
