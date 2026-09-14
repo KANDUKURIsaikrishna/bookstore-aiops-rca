@@ -6,8 +6,10 @@ import jwt from "jsonwebtoken";
 import rateLimit from "express-rate-limit";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import { Registry, collectDefaultMetrics, Counter, Histogram } from "prom-client";
+import { createLogger } from "./logger.js";
 
 const SERVICE_NAME = "api-gateway";
+const logger = createLogger(SERVICE_NAME);
 
 const registry = new Registry();
 registry.setDefaultLabels({ service: SERVICE_NAME });
@@ -104,7 +106,16 @@ export function createApp(jwtSecret, targets) {
   // is the one service in the platform actually reachable from a browser.
   app.use(cors({ origin: process.env.FRONTEND_URL || "http://localhost:3000" }));
   app.use(gatewayRateLimiter);
-  app.use(morgan("common"));
+  function jsonMorganFormat(tokens, req, res) {
+    return JSON.stringify({
+      method: tokens.method(req, res),
+      url: tokens.url(req, res),
+      status: Number(tokens.status(req, res)),
+      responseTimeMs: Number(tokens["response-time"](req, res)),
+      requestId: req.headers["x-request-id"],
+    });
+  }
+  app.use(morgan(jsonMorganFormat, { stream: { write: (line) => logger.info("http_request", JSON.parse(line)) } }));
   // Deliberately NO express.json() here — every sibling service uses
   // app.use(express.json()), but the gateway must not. http-proxy-middleware
   // forwards the raw incoming request stream to the upstream service; if
@@ -157,3 +168,5 @@ export function createApp(jwtSecret, targets) {
 
   return app;
 }
+
+export { logger };
