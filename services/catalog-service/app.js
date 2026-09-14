@@ -2,8 +2,10 @@ import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 import { Registry, collectDefaultMetrics, Counter, Histogram } from "prom-client";
+import { createLogger } from "./logger.js";
 
 const SERVICE_NAME = "catalog-service";
+const logger = createLogger(SERVICE_NAME);
 
 const registry = new Registry();
 registry.setDefaultLabels({ service: SERVICE_NAME });
@@ -35,7 +37,16 @@ export function createApp(db) {
   // k8s/services/catalog-service/base/network-policy.yaml) -- it has no
   // legitimate browser-facing origin to allow.
   app.use(express.json());
-  app.use(morgan("common"));
+  function jsonMorganFormat(tokens, req, res) {
+    return JSON.stringify({
+      method: tokens.method(req, res),
+      url: tokens.url(req, res),
+      status: Number(tokens.status(req, res)),
+      responseTimeMs: Number(tokens["response-time"](req, res)),
+      requestId: req.headers["x-request-id"],
+    });
+  }
+  app.use(morgan(jsonMorganFormat, { stream: { write: (line) => logger.info("http_request", JSON.parse(line)) } }));
 
   app.use((req, res, next) => {
     const start = Date.now();
@@ -75,14 +86,14 @@ export function createApp(db) {
 
   app.get("/books", (_req, res) => {
     db.query("SELECT * FROM books", (err, data) => {
-      if (err) { console.log(err); return res.status(500).json({ error: "Failed to fetch books" }); }
+      if (err) { logger.error("db_error", { error: err.message, stack: err.stack }); return res.status(500).json({ error: "Failed to fetch books" }); }
       return res.json(data);
     });
   });
 
   app.get("/books/:id", (req, res) => {
     db.query("SELECT * FROM books WHERE id = ?", [req.params.id], (err, data) => {
-      if (err) { console.log(err); return res.status(500).json({ error: "Failed to fetch book" }); }
+      if (err) { logger.error("db_error", { error: err.message, stack: err.stack }); return res.status(500).json({ error: "Failed to fetch book" }); }
       if (data.length === 0) return res.status(404).json({ error: "Book not found" });
       return res.json(data[0]);
     });
@@ -92,14 +103,14 @@ export function createApp(db) {
     const q = "INSERT INTO books(`title`, `desc`, `price`, `cover`) VALUES (?)";
     const values = [req.body.title, req.body.desc, req.body.price, req.body.cover];
     db.query(q, [values], (err, data) => {
-      if (err) { console.log(err); return res.status(500).json({ error: "Failed to create book" }); }
+      if (err) { logger.error("db_error", { error: err.message, stack: err.stack }); return res.status(500).json({ error: "Failed to create book" }); }
       return res.json(data);
     });
   });
 
   app.delete("/books/:id", requireAdminForDestructiveMutation, (req, res) => {
     db.query(" DELETE FROM books WHERE id = ? ", [req.params.id], (err, data) => {
-      if (err) { console.log(err); return res.status(500).json({ error: "Failed to delete book" }); }
+      if (err) { logger.error("db_error", { error: err.message, stack: err.stack }); return res.status(500).json({ error: "Failed to delete book" }); }
       return res.json(data);
     });
   });
@@ -108,7 +119,7 @@ export function createApp(db) {
     const q = "UPDATE books SET `title`= ?, `desc`= ?, `price`= ?, `cover`= ? WHERE id = ?";
     const values = [req.body.title, req.body.desc, req.body.price, req.body.cover];
     db.query(q, [...values, req.params.id], (err, data) => {
-      if (err) { console.log(err); return res.status(500).json({ error: "Failed to update book" }); }
+      if (err) { logger.error("db_error", { error: err.message, stack: err.stack }); return res.status(500).json({ error: "Failed to update book" }); }
       return res.json(data);
     });
   });
