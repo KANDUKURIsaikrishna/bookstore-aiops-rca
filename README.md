@@ -73,20 +73,21 @@ Everything runs in one EKS cluster (`bookstore-eks`, `us-west-1`), split across 
 | Layer | Technology |
 |---|---|
 | Frontend | React 18, Nginx (Alpine) |
-| Microservices | Node.js, Express, mysql2, prom-client, helmet, morgan |
+| Microservices | Node.js, Express, mysql2, prom-client, helmet, morgan (HTTP access logs), winston (structured JSON app/error logs) |
 | Database | MySQL 8.0 (RDS, Multi-AZ) |
 | Container Registry | Amazon ECR |
 | Orchestration | Kubernetes 1.31 on Amazon EKS |
 | Ingress | AWS Load Balancer Controller (ALB) |
 | Progressive Delivery | Argo Rollouts |
-| Infrastructure as Code | Terraform ≥ 1.7, AWS provider ~5.0, Helm provider |
+| Infrastructure as Code | Terraform ≥ 1.7, AWS provider ~5.0, Helm provider, Archive provider (Lambda zip packaging) |
 | CI/CD | GitHub Actions |
 | GitOps | ArgoCD |
 | Secret Management | AWS Secrets Manager + External Secrets Operator |
 | Observability | Prometheus + Grafana + Loki + Alertmanager on a dedicated EC2 (Docker Compose) |
+| AIOps RCA | Alertmanager webhook → Lambda (Python 3.12) → Loki query → Claude API narrative → DynamoDB + SES email; static S3/CloudFront dashboard backed by a second read-only Lambda |
 | Security Scanning | Trivy (containers + IaC config scan), Gitleaks (secrets), SonarCloud (code quality + coverage gate) |
 | TLS | cert-manager + Let's Encrypt / ACM |
-| Testing | Vitest per service, `vi.fn()` mock db |
+| Testing | Vitest per service (`vi.fn()` mock db), pytest + moto for the two RCA Lambdas |
 | DR | Cross-region (us-west-2) ECR replication + RDS backup replication + Route53 failover |
 
 ---
@@ -103,6 +104,7 @@ Everything runs in one EKS cluster (`bookstore-eks`, `us-west-1`), split across 
 │   │   ├── ecr/                    # ECR repositories per service
 │   │   ├── eks/                     # EKS cluster + OIDC + node group
 │   │   ├── eks-addons/               # Helm: ALB controller, ESO, ArgoCD, Argo Rollouts, VPC CNI, EBS CSI
+│   │   ├── aiops-rca/                # RCA webhook + dashboard-read Lambdas, DynamoDB, SQS DLQ, S3/CloudFront dashboard
 │   │   ├── monitoring-ec2/            # Standalone Prometheus/Grafana/Loki/Alertmanager EC2
 │   │   ├── network/                 # VPC, subnets, NAT gateway
 │   │   ├── rds/                     # RDS MySQL (Multi-AZ)
@@ -120,7 +122,14 @@ Everything runs in one EKS cluster (`bookstore-eks`, `us-west-1`), split across 
 │   ├── user-service/
 │   ├── order-service/
 │   └── notification-service/
-│   # each: Dockerfile, app.js, index.js, __tests__/
+│   # each: Dockerfile, app.js, logger.js (winston JSON), index.js, __tests__/
+│
+├── lambdas/                    # AIOps RCA pipeline, Python 3.12, stdlib + boto3 only
+│   ├── rca-lambda/               # Alertmanager-triggered: Loki query → Claude → DynamoDB → SES
+│   └── dashboard-read-lambda/    # Read-only API behind the dashboard (list/detail over DynamoDB)
+│   # each: lambda_function.py, tests/ (pytest + moto), requirements-dev.txt
+│
+├── dashboard/                   # Static RCA report viewer (index.html/script.js/style.css), served via S3+CloudFront
 │
 ├── k8s/                        # Kubernetes manifests (Kustomize base + overlays)
 │   ├── base/                    # Shared frontend resources
@@ -229,7 +238,7 @@ python3 scripts/build_and_push.py v1.2.0 --account-id 123456789012 --region us-w
 
 ## Infrastructure, Deploy, and CI/CD
 
-The platform is provisioned by 8 Terraform modules plus root-level cross-cutting resources (IAM/OIDC, CloudFront, DR), and deployed via ArgoCD GitOps across the frontend and five microservice namespaces. Full step-by-step instructions — Terraform state bootstrap, `config.env`/`scripts/configure.py`, the apply itself, and post-apply verification — live in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Module-by-module and traffic-flow detail is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+The platform is provisioned by 9 Terraform modules plus root-level cross-cutting resources (IAM/OIDC, CloudFront, DR), and deployed via ArgoCD GitOps across the frontend and five microservice namespaces. The 9th module, `aiops-rca`, provisions an Alertmanager-triggered root-cause-analysis pipeline (Lambda + Claude API + DynamoDB + SES, plus a static S3/CloudFront dashboard) — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#aiops-rca-pipeline). Full step-by-step instructions — Terraform state bootstrap, `config.env`/`scripts/configure.py`, the apply itself, and post-apply verification — live in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Module-by-module and traffic-flow detail is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 The GitHub Actions pipeline (`.github/workflows/ci-cd.yml`) runs, per push: secret scan (Gitleaks) → test/audit/validate (Vitest + coverage, npm audit, SonarCloud, kubeconform) → build-and-push (Docker build → Trivy scan → ECR push) → deploy on `main` (manual approval gate, `kustomize edit set image` → commit → ArgoCD sync).
 
@@ -252,6 +261,7 @@ The GitHub Actions pipeline (`.github/workflows/ci-cd.yml`) runs, per push: secr
 | CI/CD pipeline | GitHub Secrets only | `AWS_ROLE_ARN`, `AWS_ACCOUNT_ID`, `API_URL` — no DB credentials in the pipeline at all |
 | Local development | `.env` file | Never committed; see `.gitignore` |
 | Terraform state | AWS Secrets Manager | RDS admin credentials at `/bookstore/db-credentials`, Grafana admin at `/bookstore/grafana-admin` |
+| RCA Lambda | AWS Secrets Manager (manual population) | Claude API key at `/bookstore/claude-api-key` — Terraform only creates the empty secret shell; a human pastes the real key in (`aws secretsmanager put-secret-value`) since it isn't derivable from anything Terraform has |
 
 **Rule:** No credential, password, or account ID should ever appear in plain text in any committed file.
 

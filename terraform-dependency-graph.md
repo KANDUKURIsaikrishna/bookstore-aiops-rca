@@ -63,6 +63,12 @@ flowchart TD
     NET --> CLEAN["null_resource.cleanup_eks_networking<br/>(create = no-op; provisioner runs on destroy)"]
     NET --> R53ZONE["module.route53 · public_zone_id<br/>data.aws_route53_zone lookup — resolves early"]
 
+    %% aiops-rca only needs network + the (independent, wave-0) SES identity --
+    %% never security_groups/rds/eks, so it lands in the same wave as SG
+    NET --> RCA["module.aiops_rca<br/>DynamoDB · SQS DLQ · secret shell<br/>RCA Lambda + webhook API GW (REST)<br/>dashboard-read Lambda + HTTP API GW<br/>S3+CloudFront dashboard"]
+    SESID --> RCA
+    CID --> RCA
+
     %% ---------- Wave 2: the long pole, RDS ∥ EKS ----------
     SG --> RDS["module.rds<br/>MySQL 8.0 Multi-AZ · ~10-15 min"]
     NET --> RDS
@@ -105,12 +111,19 @@ flowchart TD
     EIP --> MON
     SHELL --> MON
     SMTPPW -.-> MON
+    RCA --> MON
 
     %% ---------- Wave 5: ALB hostname discovery ----------
     APP --> WAIT["null_resource.wait_for_alb_hostname<br/>polls for ArgoCD-deployed Ingress, then<br/>kubectl wait for ALB hostname · minutes"]
     ADDONS --> WAIT
     WAIT --> INGDATA["data.kubernetes_ingress_v1.bookstore"]
     INGDATA --> PALB["local.primary_alb_dns<br/>(= var override, else discovered hostname)"]
+
+    %% Needs both aiops_rca (done since wave 1) and monitoring_ec2's public IP
+    %% (done in wave 4) -- the one place both modules' outputs are read
+    %% together, kept out of both modules to avoid a circular dependency.
+    RCA --> RCAPOLICY["aws_api_gateway_rest_api_policy.rca_webhook<br/>IP-restricts the webhook to monitoring EC2's public IP"]
+    MON --> RCAPOLICY
 
     %% ---------- Wave 6: everything gated on the ALB hostname ----------
     RDS --> R53REC["module.route53 · alias + failover records<br/>primary / frontend / api / secondary / primary_cf<br/>+ health check + rds_endpoint private record"]
@@ -142,11 +155,11 @@ Each wave starts only when its inputs from earlier waves are done. Everything
 | Wave | Runs | Gated on | Wall time |
 |---|---|---|---|
 | **0** | `module.network`, `module.ecr`, both data sources, all `random_password`, all empty `aws_secretsmanager_secret` shells, `aws_sesv2_email_identity.alerts`, `aws_iam_user.ses_smtp`, `aws_eip.monitoring`, `aws_iam_role.github_oidc`, `aws_acm_certificate.ingress` | nothing | seconds (network: ~1-2 min for NAT/IGW) |
-| **1** | `module.security_groups`, `null_resource.cleanup_eks_networking`, `module.route53.public_zone_id` (data lookup) | `module.network` | seconds |
+| **1** | `module.security_groups`, `null_resource.cleanup_eks_networking`, `module.route53.public_zone_id` (data lookup), **`module.aiops_rca`** | `module.network` (+ the wave-0 SES identity for `aiops_rca`) | seconds |
 | **2** | **`module.rds` ∥ `module.eks`**, `aws_secretsmanager_secret_version.db_credentials`, SES chain (`ses_smtp_password`), **ACM ingress cert validation** (`aws_route53_record.ingress_cert_validation` → `aws_acm_certificate_validation.ingress`) | `security_groups` / `network` / `cleanup_eks_networking` (depends_on) | **~15-20 min** — the long pole |
 | **3** | `module.eks_addons` (its 4 Helm releases run concurrently), `kubectl_manifest.monitoring_kubelet_reader_role`; `helm`/`kubernetes`/`kubectl` providers become usable | `module.eks` | ~5-15 min (Helm, up to 900s timeout each) |
-| **4** | `kubectl_manifest.argocd_appproject` → `argocd_application` → `argocd_applicationset`; **`module.monitoring_ec2`** (in parallel) | `module.eks_addons` (+ `eip`, `alertmanager_smtp` secret, `ses_smtp_password`) | appproject/app: seconds; monitoring EC2: ~2-4 min to boot |
-| **5** | `null_resource.wait_for_alb_hostname` → `data.kubernetes_ingress_v1.bookstore` → `local.primary_alb_dns` | `kubectl_manifest.argocd_application` + `module.eks_addons` | minutes — ArgoCD has to sync the Ingress, then the ALB controller has to provision the ALB and populate its hostname |
+| **4** | `kubectl_manifest.argocd_appproject` → `argocd_application` → `argocd_applicationset`; **`module.monitoring_ec2`** (in parallel, now also fed by `module.aiops_rca`'s two outputs from wave 1) | `module.eks_addons` (+ `eip`, `alertmanager_smtp` secret, `ses_smtp_password`, `module.aiops_rca`) | appproject/app: seconds; monitoring EC2: ~2-4 min to boot |
+| **5** | `null_resource.wait_for_alb_hostname` → `data.kubernetes_ingress_v1.bookstore` → `local.primary_alb_dns`; **`aws_api_gateway_rest_api_policy.rca_webhook`** (in parallel — unrelated to the ALB chain) | `kubectl_manifest.argocd_application` + `module.eks_addons`; the policy is gated on `module.aiops_rca` (wave 1) + `module.monitoring_ec2`'s public IP (wave 4) | minutes — ArgoCD has to sync the Ingress, then the ALB controller has to provision the ALB and populate its hostname; the RCA webhook policy itself is seconds once its two inputs exist |
 | **6** | `module.route53` alias + failover records, `kubectl_manifest.monitoring_kubelet_reader_binding` | `local.primary_alb_dns` / `module.monitoring_ec2` | seconds |
 
 ---
@@ -170,6 +183,14 @@ data.aws_availability_zones
 inside the shadow of `module.eks` + `module.eks_addons`. A full stand-up is
 roughly `eks + eks_addons + ALB-discovery`, **not** `rds + eks + everything
 else` summed.
+
+`module.aiops_rca` isn't on the critical path either — it only needs
+`module.network` and the independent `aws_sesv2_email_identity.alerts`
+(both wave 0/1), so it's done well before `module.monitoring_ec2` (wave 4)
+ever needs its two outputs. The one resource that waits on it downstream,
+`aws_api_gateway_rest_api_policy.rca_webhook`, is gated on `monitoring_ec2`
+reaching wave 4 anyway, so `aiops_rca` finishing early buys it nothing —
+it's just idle from wave 1 onward until `monitoring_ec2` catches up.
 
 ---
 

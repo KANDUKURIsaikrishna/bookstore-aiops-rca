@@ -11,6 +11,7 @@ How to actually stand this project up, end to end, from a fresh AWS account. Thi
 - [Step 2 — Bootstrap Terraform state](#step-2--bootstrap-terraform-state-once-per-aws-account)
 - [Step 3 — Bootstrap the domain](#step-3--bootstrap-the-domain-once-per-domain-ever)
 - [Step 4 — One apply, everything](#step-4--one-apply-everything)
+- [Populate the Claude API key (RCA pipeline)](#populate-the-claude-api-key-rca-pipeline)
 - [Step 5 — Configure GitHub Secrets & Variables](#step-5--configure-github-secrets--variables-for-cicd)
 - [Step 6 — Import known-conflicting entries](#step-6--import-known-conflicting-entries-if-re-deploying)
 - [Step 7 — Confirm the ExternalSecrets IRSA fix](#step-7--confirm-the-externalsecrets-irsa-fix-actually-took)
@@ -123,14 +124,19 @@ Creates the public Route53 hosted zone for `DOMAIN` (from `config.env`) if it do
 ```bash
 cd terraform
 terraform plan -out=tfplan
-# review it — expect ~145 resources on a genuinely fresh account:
+# review it — expect ~145 resources on a genuinely fresh account, plus the
+# aiops-rca module's own ~30 (see below):
 #   VPC + subnets + NAT + IGW + S3 endpoint, security groups, 2 ACM certs
 #   (CloudFront's, off by default, + the real one the ALB uses), RDS instance,
 #   private Route53 zone (the public zone is looked up, not created — see Step 3),
 #   ECR repos, EKS cluster + node group + OIDC provider,
 #   eks-addons (ESO, AWS Load Balancer Controller, ArgoCD, Argo Rollouts),
 #   monitoring EC2 + EIP, GitHub OIDC role,
-#   the ArgoCD AppProject + Application + ApplicationSet (kubectl_manifest, see below)
+#   the ArgoCD AppProject + Application + ApplicationSet (kubectl_manifest, see below),
+#   aiops-rca: DynamoDB table + GSI, SQS DLQ, the Claude API key secret shell,
+#   the RCA Lambda + its VPC security group + IP-restricted webhook API Gateway,
+#   the dashboard-read Lambda + open HTTP API Gateway, S3 bucket + CloudFront
+#   distribution + OAC for the static dashboard (see ARCHITECTURE.md#aiops-rca-pipeline)
 terraform apply tfplan
 ```
 
@@ -139,6 +145,18 @@ terraform apply tfplan
 `argocd.tf` also applies `k8s/argocd/appproject.yaml`, `k8s/argocd/application.yaml`, and `k8s/argocd/applicationset-microservices.yaml` directly (via the `kubectl_manifest` resource, `gavinbunney/kubectl` provider) — no more manual `kubectl apply -f k8s/argocd/...` after the fact. All three wait on `module.eks_addons` (they need ArgoCD's CRDs to exist); the Application and ApplicationSet additionally wait on the AppProject, since ArgoCD rejects either one naming a project that doesn't exist.
 
 RDS (~10-15 min) and EKS (~15-20 min) are the slow parts and provision concurrently, since neither depends on the other directly (both depend on `network`/`security`, not on each other). The `eks-addons` Helm releases run after the cluster is up, now fully concurrently with each other too (see [`ARCHITECTURE.md`](ARCHITECTURE.md#terraform-module-graph)). As long as Step 3's NS records were set and have propagated, `aws_acm_certificate_validation.ingress` resolves on its own within a few minutes — no manual registrar step here anymore (that used to be required after *every* destroy+recreate cycle, since the public zone was Terraform-managed and got brand-new NS values each time it was recreated; it's now a `data` lookup instead, see Step 3).
+
+### Populate the Claude API key (RCA pipeline)
+
+The apply above only creates an empty Secrets Manager shell at `/bookstore/claude-api-key` — a real Claude API key isn't derivable from anything Terraform has, so it has to be pasted in by hand, once:
+
+```bash
+aws secretsmanager put-secret-value \
+  --secret-id /bookstore/claude-api-key \
+  --secret-string "sk-ant-..."
+```
+
+Until this is done, the RCA Lambda (triggered by Alertmanager on a firing alert) still runs, still queries Loki, and still writes a report — but the report's `narrative` field comes back as whatever error the Claude API call raised (auth failure), not a real root-cause analysis. Skip this step entirely if you don't want the RCA pipeline live yet; nothing else in the stack depends on it.
 
 ## Step 5 — Configure GitHub Secrets & Variables for CI/CD
 
@@ -313,6 +331,12 @@ terraform output prometheus_url     # Prometheus, also user "admin"
 terraform output alertmanager_url   # Alertmanager, also user "admin"
 aws secretsmanager get-secret-value --secret-id /bookstore/grafana-admin --query SecretString --output text
 aws secretsmanager get-secret-value --secret-id /bookstore/monitoring-basic-auth --query SecretString --output text
+
+# RCA pipeline (no login — the webhook is IP-restricted to the monitoring EC2
+# itself, not user-facing; the dashboard is open, read-only)
+terraform output rca_dashboard_url            # static S3+CloudFront RCA report viewer
+terraform output rca_dashboard_read_api_url   # what the dashboard's script.js calls
+terraform output rca_webhook_invoke_url       # what Alertmanager POSTs alerts to
 ```
 
 > **On Windows**, run `python3 scripts/monitoring_credentials.py` instead of the block above — Git Bash silently mangles any argument starting with `/` (like `--secret-id /bookstore/grafana-admin`) into a Windows path before it reaches `aws.exe`, which fails with a confusing "Invalid name" error. The script prints every URL + password in one table, sidestepping that entirely.
