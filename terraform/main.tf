@@ -41,6 +41,13 @@ module "rds" {
   # enough to silently create a live cross-region secret replica on every
   # apply, DR intent or not. See OBS-049.
   secondary_region = var.enable_dr_replication ? var.secondary_region : ""
+
+  secrets_recovery_window_days = var.secrets_recovery_window_days
+
+  # Off unless var.enable_rds_secret_rotation is true -- see
+  # rds-secret-rotation.tf for what deploys the Lambda this ARN points at.
+  rotation_lambda_arn = var.enable_rds_secret_rotation ? aws_serverlessapplicationrepository_cloudformation_stack.rds_rotation[0].outputs["RotationLambdaARN"] : ""
+  rotation_days       = var.rds_secret_rotation_days
 }
 
 # ── Per-service DB credentials ─────────────────────────────────────────────────
@@ -69,7 +76,7 @@ resource "random_password" "db_credentials" {
 resource "aws_secretsmanager_secret" "db_credentials" {
   for_each                = local.db_service_credentials
   name                    = "/bookstore/${each.key}-db-credentials"
-  recovery_window_in_days = 0 # 0 = force delete on destroy, matches modules/rds pattern
+  recovery_window_in_days = var.secrets_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "db_credentials" {
@@ -95,7 +102,7 @@ resource "random_password" "jwt_secret" {
 
 resource "aws_secretsmanager_secret" "jwt_secret" {
   name                    = "/bookstore/jwt-secret"
-  recovery_window_in_days = 0
+  recovery_window_in_days = var.secrets_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "jwt_secret" {
@@ -245,7 +252,7 @@ resource "aws_iam_access_key" "ses_smtp" {
 
 resource "aws_secretsmanager_secret" "alertmanager_smtp" {
   name                    = "/bookstore/alertmanager-smtp"
-  recovery_window_in_days = 0
+  recovery_window_in_days = var.secrets_recovery_window_days
 }
 
 # No aws_secretsmanager_secret_version here on purpose -- the SMTP password
@@ -337,6 +344,9 @@ module "aiops_rca" {
   alert_email       = var.alert_email
   region            = var.aws_region
   account_id        = data.aws_caller_identity.current.account_id
+
+  claude_api_key               = var.claude_api_key
+  secrets_recovery_window_days = var.secrets_recovery_window_days
 }
 
 resource "aws_api_gateway_rest_api_policy" "rca_webhook" {
@@ -366,6 +376,8 @@ module "eks_addons" {
   oidc_provider_url = module.eks.oidc_provider_url
   aws_region        = var.aws_region
   node_role_name    = module.eks.node_role_name
+
+  secrets_recovery_window_days = var.secrets_recovery_window_days
 
   # module.network explicitly, not just module.eks: nothing in eks_addons
   # references the NAT gateway's ID directly (EKS/node group reference

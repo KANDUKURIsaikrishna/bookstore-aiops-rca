@@ -9,6 +9,8 @@ A production-grade, cloud-native bookstore application on AWS, built as a refere
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System-level view: current state, module graph, region layout, the microservices platform |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | How to stand this up from zero, step by step |
 | [`docs/UML.md`](docs/UML.md) | Application-layer UML: component/class/ER diagrams, auth + checkout sequence diagrams |
+| [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Real incidents (OBS-NNN/TF-NNN), symptom/cause/fix — referenced by ID throughout the codebase |
+| [`docs/compliance/`](docs/compliance/) | SOC 2 / ISO 27001 / PCI DSS policy documents |
 
 ---
 
@@ -277,6 +279,9 @@ The GitHub Actions pipeline (`.github/workflows/ci-cd.yml`) runs, per push: secr
 | Dependency CVEs | `npm audit --omit=dev --audit-level=high` per service and frontend |
 | Container CVEs | Trivy blocks pushes on CRITICAL/HIGH unfixed vulns |
 | IaC security | Trivy's config scanner runs on every Terraform change |
+| Image provenance | Every pushed image signed with cosign (keyless, GitHub OIDC) — `cosign verify` proves which CI run built it |
+| Dependency freshness | Dependabot — weekly PRs across npm, pip, Terraform, Docker base images, GitHub Actions |
+| Account-level audit trail | CloudTrail, multi-region, log file validation on, S3 Object Lock (compliance mode) — see `terraform/cloudtrail.tf` |
 | No static AWS keys | GitHub OIDC → IAM role assumption |
 | Secrets in-cluster | External Secrets Operator + AWS Secrets Manager |
 | Non-root containers | All pods run as non-root |

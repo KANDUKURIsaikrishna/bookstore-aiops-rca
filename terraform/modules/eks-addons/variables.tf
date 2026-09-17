@@ -23,3 +23,9 @@ variable "aws_region" {
   type        = string
 }
 
+variable "secrets_recovery_window_days" {
+  description = "recovery_window_in_days for this module's Secrets Manager secrets (grafana_admin, monitoring_basic_auth). 0 = force delete (this project's dev-cycle default, see TF-012); 7-30 for a real production account."
+  type        = number
+  default     = 0
+}
+

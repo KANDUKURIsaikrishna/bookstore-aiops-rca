@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from unittest.mock import patch, MagicMock
 
 import boto3
@@ -13,6 +14,10 @@ os.environ["SES_FROM_EMAIL"] = "alerts@example.com"
 os.environ["SES_TO_EMAIL"] = "alerts@example.com"
 os.environ["CLAUDE_MODEL"] = "claude-sonnet-5"
 os.environ["LOG_WINDOW_MINUTES"] = "5"
+os.environ["REPORT_RETENTION_DAYS"] = "400"
+os.environ["MAX_LOG_LINES_PER_SERVICE"] = "12"
+os.environ["MAX_LOG_LINE_CHARS"] = "400"
+os.environ["CLAUDE_MAX_TOKENS"] = "700"
 
 import lambda_function  # noqa: E402 -- env vars above must be set before import
 
@@ -82,6 +87,55 @@ def test_handler_calls_claude_and_writes_report_when_logs_exist(dynamodb_table):
     assert len(items) == 1
     assert items[0]["narrative"] == "Root cause: DB timeout in order-service."
     assert items[0]["status"] == "ok"
+
+
+def test_write_report_sets_ttl_from_retention_window(dynamodb_table):
+    before = int(time.time()) + 400 * 86400
+    lambda_function.write_report(
+        {"alert_id": "ttl-test", "service": "order-service", "alertname": "HighErrorRate"},
+        "narrative", [], "ok",
+    )
+    after = int(time.time()) + 400 * 86400
+
+    table = boto3.resource("dynamodb", region_name="us-west-1").Table(os.environ["DYNAMODB_TABLE"])
+    item = table.scan()["Items"][0]
+    assert before <= item["expires_at"] <= after
+
+
+def test_build_prompt_caps_lines_per_service_to_control_token_cost():
+    logs_by_service = {"order-service": [f"line-{i}" for i in range(50)]}
+    prompt = lambda_function.build_prompt(
+        {"alertname": "HighErrorRate", "service": "order-service", "severity": "critical", "firing_timestamp": "t"},
+        logs_by_service,
+    )
+    assert prompt.count("line-") == 12  # MAX_LOG_LINES_PER_SERVICE, not all 50
+    assert "line-11" in prompt
+    assert "line-12" not in prompt
+
+
+def test_build_prompt_truncates_long_log_lines_to_control_token_cost():
+    long_line = "x" * 1000
+    prompt = lambda_function.build_prompt(
+        {"alertname": "HighErrorRate", "service": "order-service", "severity": "critical", "firing_timestamp": "t"},
+        {"order-service": [long_line]},
+    )
+    included = [l for l in prompt.splitlines() if l.startswith("x")][0]
+    assert len(included) <= 400 + len("...[truncated]")
+    assert included.endswith("...[truncated]")
+
+
+def test_call_claude_uses_configured_max_tokens_to_control_output_cost():
+    success_response = MagicMock()
+    success_response.__enter__.return_value.read.return_value = json.dumps(
+        {"content": [{"text": "ok"}]}
+    ).encode()
+
+    with patch("lambda_function.get_claude_api_key", return_value="sk-test"), \
+         patch("lambda_function.urllib.request.urlopen", return_value=success_response) as mock_urlopen:
+        lambda_function.call_claude("test prompt")
+
+    sent_payload = json.loads(mock_urlopen.call_args[0][0].data)
+    assert sent_payload["max_tokens"] == 700
 
 
 def test_call_claude_retries_on_transient_failure():

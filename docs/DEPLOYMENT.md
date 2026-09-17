@@ -12,6 +12,7 @@ How to actually stand this project up, end to end, from a fresh AWS account. Thi
 - [Step 3 — Bootstrap the domain](#step-3--bootstrap-the-domain-once-per-domain-ever)
 - [Step 4 — One apply, everything](#step-4--one-apply-everything)
 - [Populate the Claude API key (RCA pipeline)](#populate-the-claude-api-key-rca-pipeline)
+- [Optional: harden for a real (non-demo) account](#optional-harden-for-a-real-non-demo-account)
 - [Step 5 — Configure GitHub Secrets & Variables](#step-5--configure-github-secrets--variables-for-cicd)
 - [Step 6 — Import known-conflicting entries](#step-6--import-known-conflicting-entries-if-re-deploying)
 - [Step 7 — Confirm the ExternalSecrets IRSA fix](#step-7--confirm-the-externalsecrets-irsa-fix-actually-took)
@@ -136,7 +137,9 @@ terraform plan -out=tfplan
 #   aiops-rca: DynamoDB table + GSI, SQS DLQ, the Claude API key secret shell,
 #   the RCA Lambda + its VPC security group + IP-restricted webhook API Gateway,
 #   the dashboard-read Lambda + open HTTP API Gateway, S3 bucket + CloudFront
-#   distribution + OAC for the static dashboard (see ARCHITECTURE.md#aiops-rca-pipeline)
+#   distribution + OAC for the static dashboard (see ARCHITECTURE.md#aiops-rca-pipeline),
+#   a multi-region CloudTrail trail + its own S3 bucket (Object Lock,
+#   COMPLIANCE mode) -- see ARCHITECTURE.md's "No CloudWatch..." section
 terraform apply tfplan
 ```
 
@@ -148,7 +151,21 @@ RDS (~10-15 min) and EKS (~15-20 min) are the slow parts and provision concurren
 
 ### Populate the Claude API key (RCA pipeline)
 
-The apply above only creates an empty Secrets Manager shell at `/bookstore/claude-api-key` — a real Claude API key isn't derivable from anything Terraform has, so it has to be pasted in by hand, once:
+A real Claude API key isn't derivable from anything Terraform has, so it always comes from a human. Two ways to set it — pick one:
+
+**Preferred: set it in `config.env` before you apply.**
+
+```bash
+# in config.env:
+CLAUDE_API_KEY=sk-ant-...
+
+python3 scripts/configure.py   # regenerates terraform.tfvars with it
+terraform apply                # creates the secret's real value, not just the shell
+```
+
+To rotate the key later, change `CLAUDE_API_KEY` in `config.env` and re-run both commands — no manual AWS CLI call needed. `config.env` and the `terraform.tfvars` it generates are both gitignored, so the key never touches git; `terraform plan`/`apply` never prints it either (the variable is `sensitive`). It does land in Terraform state, in the same encrypted S3 backend every other secret in this project's state already sits in (DB credentials, JWT secret, Grafana admin) — a deliberate, consistent tradeoff, not a new one.
+
+**Alternative: leave `CLAUDE_API_KEY` blank and populate the secret by hand instead**, once, after apply:
 
 ```bash
 aws secretsmanager put-secret-value \
@@ -156,7 +173,20 @@ aws secretsmanager put-secret-value \
   --secret-string "sk-ant-..."
 ```
 
-Until this is done, the RCA Lambda (triggered by Alertmanager on a firing alert) still runs, still queries Loki, and still writes a report — but the report's `narrative` field comes back as whatever error the Claude API call raised (auth failure), not a real root-cause analysis. Skip this step entirely if you don't want the RCA pipeline live yet; nothing else in the stack depends on it.
+Either way, until the secret has a real value, the RCA Lambda (triggered by Alertmanager on a firing alert) still runs, still queries Loki, and still writes a report — but the report's `narrative` field comes back as whatever error the Claude API call raised (auth failure), not a real root-cause analysis. Skip this entirely if you don't want the RCA pipeline live yet; nothing else in the stack depends on it.
+
+By default the RCA Lambda calls Claude Haiku, not Sonnet (`var.claude_model`, cheaper per token — this is a log-summarization task, not deep reasoning) with `max_tokens` capped at 700 (`var.claude_max_tokens`) and the prompt capped at 12 log lines per service, 400 characters each (`var.max_log_lines_per_service` / `var.max_log_line_chars`) — the biggest cost lever for this pipeline is prompt size (up to 5 services' logs in one call), so these caps exist specifically to keep the token bill predictable regardless of how noisy a service's logging gets. Override any of them in `terraform.tfvars` if you want deeper (pricier) analysis for a harder incident.
+
+### Optional: harden for a real (non-demo) account
+
+Everything below defaults to this project's usual dev-cycle-friendly posture (fast, cheap, frequently destroyed/recreated) and needs an explicit opt-in for anything closer to production. None of it is required to stand the stack up.
+
+- **`enable_rds_secret_rotation`** (default `false`) — deploys AWS's official single-user MySQL rotation Lambda (via the Serverless Application Repository) and wires it into `/bookstore/db-credentials`. Read the comment at the top of `terraform/rds-secret-rotation.tf` before turning this on — it was written and `terraform validate`'d without a live AWS account to check the SAR app's current parameter schema against, so confirm that first with `aws serverlessrepo get-application`.
+- **`secrets_recovery_window_days`** (default `0`) — every Secrets Manager secret in this project force-deletes on destroy with no soft-delete window, deliberately, so this stack can be torn down and rebuilt often during development (see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) TF-012). Set to `7`-`30` for a real account so an accidental delete/taint of a live credential is recoverable.
+- **`cloudtrail_retention_days`** (default `400`) — how long CloudTrail logs are locked under S3 Object Lock before they can be cleaned up. 400 (~1yr + margin) is a reasonable audit-evidence baseline; raise it if a specific compliance framework you're targeting requires longer.
+- **GitHub branch protection on `main`** — already configured on this project's own canonical repo (required CODEOWNERS review, required CI status checks, no force-push/deletion) directly via `gh api`, **not** by Terraform or `scripts/configure.py`. A fork or a differently-named repo needs its own — see [`docs/compliance/CHANGE_MANAGEMENT_SOP.md`](compliance/CHANGE_MANAGEMENT_SOP.md) for the exact settings.
+
+See [`docs/compliance/`](compliance/) for the full SOC 2/ISO 27001/PCI DSS policy set these controls exist to satisfy, and [`docs/compliance/INFORMATION_SECURITY_POLICY.md`](compliance/INFORMATION_SECURITY_POLICY.md) specifically for the cryptography/rotation rationale.
 
 ## Step 5 — Configure GitHub Secrets & Variables for CI/CD
 
@@ -367,4 +397,6 @@ Since `argocd.tf`'s `kubectl_manifest` resources are now what created the ArgoCD
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — system-level view: module graph, region layout, secrets flow, GitOps deployment flow
 - [`UML.md`](UML.md) — application-layer UML: component/class/ER/sequence diagrams
+- [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) — real incidents (OBS-NNN/TF-NNN), symptom/cause/fix
+- [`compliance/`](compliance/) — SOC 2/ISO 27001/PCI DSS policy documents
 - [`README.md`](../README.md) — tech stack, repo structure, local development, CI/CD overview

@@ -251,6 +251,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
+      # Keyless signing via GitHub's own OIDC token (id-token: write above) --
+      # no cosign key pair to manage or leak. Signs by ECR digest, not tag,
+      # so `cosign verify` can prove exactly which build produced the image
+      # currently running, not just that *some* build with that tag once
+      # existed (ECR's own tag immutability already covers overwrite, this
+      # covers provenance).
+      - name: Install cosign
+        uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20  # v3.7.0
+
       # ── Catalog service image ────────────────────────────────────────────
       - name: Build catalog-service image (no push yet)
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
@@ -290,8 +299,13 @@ jobs:
           category:   trivy-catalog-service
 
       - name: Push catalog-service image
+        id: push_catalog
         run: |
           docker push ${{ env.ECR_REGISTRY }}/${{ env.CATALOG_REPO }}:${{ steps.tag.outputs.tag }}
+          echo "digest=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ env.ECR_REGISTRY }}/${{ env.CATALOG_REPO }}:${{ steps.tag.outputs.tag }})" >> "$GITHUB_OUTPUT"
+
+      - name: Sign catalog-service image (cosign, keyless)
+        run: cosign sign --yes "${{ steps.push_catalog.outputs.digest }}"
 
       # ── User service image ───────────────────────────────────────────────
       - name: Build user-service image (no push yet)
@@ -332,8 +346,13 @@ jobs:
           category:   trivy-user-service
 
       - name: Push user-service image
+        id: push_user
         run: |
           docker push ${{ env.ECR_REGISTRY }}/${{ env.USER_REPO }}:${{ steps.tag.outputs.tag }}
+          echo "digest=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ env.ECR_REGISTRY }}/${{ env.USER_REPO }}:${{ steps.tag.outputs.tag }})" >> "$GITHUB_OUTPUT"
+
+      - name: Sign user-service image (cosign, keyless)
+        run: cosign sign --yes "${{ steps.push_user.outputs.digest }}"
 
       # ── Notification service image ───────────────────────────────────────
       - name: Build notification-service image (no push yet)
@@ -374,8 +393,13 @@ jobs:
           category:   trivy-notification-service
 
       - name: Push notification-service image
+        id: push_notification
         run: |
           docker push ${{ env.ECR_REGISTRY }}/${{ env.NOTIFICATION_REPO }}:${{ steps.tag.outputs.tag }}
+          echo "digest=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ env.ECR_REGISTRY }}/${{ env.NOTIFICATION_REPO }}:${{ steps.tag.outputs.tag }})" >> "$GITHUB_OUTPUT"
+
+      - name: Sign notification-service image (cosign, keyless)
+        run: cosign sign --yes "${{ steps.push_notification.outputs.digest }}"
 
       # ── Order service image ──────────────────────────────────────────────
       - name: Build order-service image (no push yet)
@@ -416,8 +440,13 @@ jobs:
           category:   trivy-order-service
 
       - name: Push order-service image
+        id: push_order
         run: |
           docker push ${{ env.ECR_REGISTRY }}/${{ env.ORDER_REPO }}:${{ steps.tag.outputs.tag }}
+          echo "digest=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ env.ECR_REGISTRY }}/${{ env.ORDER_REPO }}:${{ steps.tag.outputs.tag }})" >> "$GITHUB_OUTPUT"
+
+      - name: Sign order-service image (cosign, keyless)
+        run: cosign sign --yes "${{ steps.push_order.outputs.digest }}"
 
       # ── API gateway image ────────────────────────────────────────────────
       - name: Build api-gateway image (no push yet)
@@ -458,8 +487,13 @@ jobs:
           category:   trivy-api-gateway
 
       - name: Push api-gateway image
+        id: push_api_gateway
         run: |
           docker push ${{ env.ECR_REGISTRY }}/${{ env.API_GATEWAY_REPO }}:${{ steps.tag.outputs.tag }}
+          echo "digest=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ env.ECR_REGISTRY }}/${{ env.API_GATEWAY_REPO }}:${{ steps.tag.outputs.tag }})" >> "$GITHUB_OUTPUT"
+
+      - name: Sign api-gateway image (cosign, keyless)
+        run: cosign sign --yes "${{ steps.push_api_gateway.outputs.digest }}"
 
       # ── Frontend image ───────────────────────────────────────────────────
       - name: Build frontend image (no push yet)
@@ -501,8 +535,13 @@ jobs:
           category:   trivy-frontend
 
       - name: Push frontend image
+        id: push_frontend
         run: |
           docker push ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:${{ steps.tag.outputs.tag }}
+          echo "digest=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ env.ECR_REGISTRY }}/${{ env.FRONTEND_REPO }}:${{ steps.tag.outputs.tag }})" >> "$GITHUB_OUTPUT"
+
+      - name: Sign frontend image (cosign, keyless)
+        run: cosign sign --yes "${{ steps.push_frontend.outputs.digest }}"
 
   # ─────────────────────────────────────────────────────────────────────────
   # STAGE 4 · GitOps image-tag update

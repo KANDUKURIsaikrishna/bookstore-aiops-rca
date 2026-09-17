@@ -31,6 +31,10 @@ resource "aws_lambda_function" "rca" {
       SES_TO_EMAIL              = var.alert_email
       CLAUDE_MODEL              = var.claude_model
       LOG_WINDOW_MINUTES        = tostring(var.log_window_minutes)
+      REPORT_RETENTION_DAYS     = tostring(var.rca_report_retention_days)
+      MAX_LOG_LINES_PER_SERVICE = tostring(var.max_log_lines_per_service)
+      MAX_LOG_LINE_CHARS        = tostring(var.max_log_line_chars)
+      CLAUDE_MAX_TOKENS         = tostring(var.claude_max_tokens)
     }
   }
 }

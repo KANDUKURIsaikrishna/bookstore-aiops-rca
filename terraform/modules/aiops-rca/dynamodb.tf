@@ -36,4 +36,14 @@ resource "aws_dynamodb_table" "rca_reports" {
     range_key       = "created_at"
     projection_type = "ALL"
   }
+
+  # Data-minimization control: reports may carry raw log excerpts (see
+  # var.rca_report_retention_days' description). DynamoDB TTL deletes expired
+  # items automatically within ~48h of the epoch value stored in
+  # `expires_at` -- lambda_function.py's write_report() sets it on every
+  # PutItem, computed from this same retention window.
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
 }

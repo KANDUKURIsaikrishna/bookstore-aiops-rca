@@ -16,8 +16,9 @@ Include, where possible:
 Before reporting, check whether the issue is already addressed by one of this project's existing controls (see [`README.md`](README.md#security-controls)):
 - Gitleaks (secret scanning, full git history) on every push
 - SonarCloud (SAST, code smells, security hotspots)
-- Trivy (container CVE scanning, blocks on CRITICAL/HIGH)
-- tfsec (Terraform IaC scanning)
+- Trivy (container CVE scanning, blocks on CRITICAL/HIGH; also runs as the Terraform IaC config scanner — replaced tfsec, see `.github/workflows/terraform.yml`)
+- cosign (keyless image signing — every pushed image is signed via GitHub OIDC, verifiable provenance beyond ECR's own tag immutability)
+- Dependabot (weekly automated dependency-update PRs — npm, pip, Terraform, Docker base images, GitHub Actions)
 - GitHub OIDC → IAM role assumption (no static AWS keys anywhere)
 - External Secrets Operator + AWS Secrets Manager (no secrets in git or k8s manifests)
 - Non-root containers, read-only root filesystems, Kubernetes NetworkPolicy segmentation

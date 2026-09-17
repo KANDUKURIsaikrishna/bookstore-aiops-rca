@@ -2,6 +2,25 @@ resource "aws_s3_bucket" "dashboard" {
   bucket = "bookstore-rca-dashboard-${var.account_id}"
 }
 
+# Explicit resources rather than relying on AWS's platform-default SSE-S3 --
+# an auditor wants evidence of intent in the code, not an assumption about
+# an account-level default that could change or differ per account.
+resource "aws_s3_bucket_server_side_encryption_configuration" "dashboard" {
+  bucket = aws_s3_bucket.dashboard.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_versioning" "dashboard" {
+  bucket = aws_s3_bucket.dashboard.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_public_access_block" "dashboard" {
   bucket                  = aws_s3_bucket.dashboard.id
   block_public_acls       = true
