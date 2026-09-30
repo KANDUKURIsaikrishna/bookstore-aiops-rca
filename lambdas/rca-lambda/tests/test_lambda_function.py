@@ -9,7 +9,7 @@ from moto import mock_aws
 
 os.environ["AWS_DEFAULT_REGION"] = "us-west-1"
 os.environ["DYNAMODB_TABLE"] = "rca_reports_test"
-os.environ["CLAUDE_API_KEY_SECRET_ARN"] = "arn:aws:secretsmanager:us-west-1:123456789012:secret:claude-key"
+os.environ["LLM_API_KEY_SECRET_ARN"] = "arn:aws:secretsmanager:us-west-1:123456789012:secret:llm-key"
 os.environ["SES_FROM_EMAIL"] = "alerts@example.com"
 os.environ["SES_TO_EMAIL"] = "alerts@example.com"
 os.environ["CLAUDE_MODEL"] = "claude-sonnet-5"
@@ -73,13 +73,13 @@ def test_handler_calls_claude_and_writes_report_when_logs_exist(dynamodb_table):
     fake_logs.update({s: [] for s in lambda_function.SERVICES if s != "order-service"})
 
     with patch("lambda_function.query_loki", side_effect=lambda service, *_: fake_logs[service]), \
-         patch("lambda_function.call_claude", return_value="Root cause: DB timeout in order-service.") as mock_claude, \
+         patch("lambda_function.call_llm", return_value="Root cause: DB timeout in order-service.") as mock_llm, \
          patch("lambda_function._ses") as mock_ses:
         result = lambda_function.handler(make_alertmanager_event(), None)
 
     assert result["statusCode"] == 200
     assert json.loads(result["body"])["status"] == "ok"
-    mock_claude.assert_called_once()
+    mock_llm.assert_called_once()
     mock_ses.send_email.assert_called_once()
 
     table = boto3.resource("dynamodb", region_name="us-west-1").Table(os.environ["DYNAMODB_TABLE"])
@@ -124,42 +124,104 @@ def test_build_prompt_truncates_long_log_lines_to_control_token_cost():
     assert included.endswith("...[truncated]")
 
 
-def test_call_claude_uses_configured_max_tokens_to_control_output_cost():
+def test_call_llm_uses_configured_max_tokens_to_control_output_cost():
     success_response = MagicMock()
     success_response.__enter__.return_value.read.return_value = json.dumps(
         {"content": [{"text": "ok"}]}
     ).encode()
 
-    with patch("lambda_function.get_claude_api_key", return_value="sk-test"), \
+    with patch("lambda_function.get_llm_api_key", return_value="sk-test"), \
          patch("lambda_function.urllib.request.urlopen", return_value=success_response) as mock_urlopen:
-        lambda_function.call_claude("test prompt")
+        lambda_function.call_llm("test prompt")
 
     sent_payload = json.loads(mock_urlopen.call_args[0][0].data)
     assert sent_payload["max_tokens"] == 700
 
 
-def test_call_claude_retries_on_transient_failure():
+def test_call_llm_retries_on_transient_failure():
     success_response = MagicMock()
     success_response.__enter__.return_value.read.return_value = json.dumps(
         {"content": [{"text": "ok"}]}
     ).encode()
 
-    with patch("lambda_function.get_claude_api_key", return_value="sk-test"), \
+    with patch("lambda_function.get_llm_api_key", return_value="sk-test"), \
          patch("lambda_function.urllib.request.urlopen") as mock_urlopen, \
          patch("lambda_function.time.sleep"):
         mock_urlopen.side_effect = [Exception("timeout"), success_response]
-        result = lambda_function.call_claude("test prompt", max_retries=3)
+        result = lambda_function.call_llm("test prompt", max_retries=3)
 
     assert result == "ok"
     assert mock_urlopen.call_count == 2
 
 
-def test_call_claude_raises_after_exhausting_retries():
-    with patch("lambda_function.get_claude_api_key", return_value="sk-test"), \
+def test_call_llm_raises_after_exhausting_retries():
+    with patch("lambda_function.get_llm_api_key", return_value="sk-test"), \
          patch("lambda_function.urllib.request.urlopen", side_effect=Exception("down")), \
          patch("lambda_function.time.sleep"):
         with pytest.raises(Exception, match="down"):
-            lambda_function.call_claude("test prompt", max_retries=2)
+            lambda_function.call_llm("test prompt", max_retries=2)
+
+
+def test_call_llm_dispatches_to_anthropic_by_default():
+    success_response = MagicMock()
+    success_response.__enter__.return_value.read.return_value = json.dumps(
+        {"content": [{"text": "anthropic reply"}]}
+    ).encode()
+
+    with patch("lambda_function.get_llm_api_key", return_value="sk-ant-test"), \
+         patch("lambda_function.urllib.request.urlopen", return_value=success_response) as mock_urlopen:
+        result = lambda_function.call_llm("test prompt")
+
+    assert result == "anthropic reply"
+    sent_request = mock_urlopen.call_args[0][0]
+    assert sent_request.full_url == "https://api.anthropic.com/v1/messages"
+    assert sent_request.headers["X-api-key"] == "sk-ant-test"
+
+
+def test_call_llm_dispatches_to_openai():
+    success_response = MagicMock()
+    success_response.__enter__.return_value.read.return_value = json.dumps(
+        {"choices": [{"message": {"content": "openai reply"}}]}
+    ).encode()
+
+    with patch("lambda_function.LLM_PROVIDER", "openai"), \
+         patch("lambda_function.get_llm_api_key", return_value="sk-oai-test"), \
+         patch("lambda_function.urllib.request.urlopen", return_value=success_response) as mock_urlopen:
+        result = lambda_function.call_llm("test prompt")
+
+    assert result == "openai reply"
+    sent_request = mock_urlopen.call_args[0][0]
+    assert sent_request.full_url == "https://api.openai.com/v1/chat/completions"
+    assert sent_request.headers["Authorization"] == "Bearer sk-oai-test"
+    sent_payload = json.loads(sent_request.data)
+    assert sent_payload["messages"] == [{"role": "user", "content": "test prompt"}]
+
+
+def test_call_llm_dispatches_to_gemini():
+    success_response = MagicMock()
+    success_response.__enter__.return_value.read.return_value = json.dumps(
+        {"candidates": [{"content": {"parts": [{"text": "gemini reply"}]}}]}
+    ).encode()
+
+    with patch("lambda_function.LLM_PROVIDER", "gemini"), \
+         patch("lambda_function.LLM_MODEL", "gemini-2.5-flash"), \
+         patch("lambda_function.get_llm_api_key", return_value="AIza-test"), \
+         patch("lambda_function.urllib.request.urlopen", return_value=success_response) as mock_urlopen:
+        result = lambda_function.call_llm("test prompt")
+
+    assert result == "gemini reply"
+    sent_request = mock_urlopen.call_args[0][0]
+    assert sent_request.full_url == (
+        "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=AIza-test"
+    )
+    sent_payload = json.loads(sent_request.data)
+    assert sent_payload["contents"] == [{"parts": [{"text": "test prompt"}]}]
+
+
+def test_call_llm_raises_on_unsupported_provider():
+    with patch("lambda_function.LLM_PROVIDER", "not-a-real-provider"):
+        with pytest.raises(ValueError, match="not-a-real-provider"):
+            lambda_function.call_llm("test prompt")
 
 
 def test_parse_alertmanager_payload_extracts_expected_fields():
@@ -171,3 +233,23 @@ def test_parse_alertmanager_payload_extracts_expected_fields():
         "severity": "critical",
         "firing_timestamp": "2026-09-12T10:00:00Z",
     }
+
+
+def test_legacy_claude_api_key_secret_arn_still_works_without_llm_api_key_secret_arn():
+    # Deployments that only ever set CLAUDE_API_KEY_SECRET_ARN (pre-rename)
+    # must keep working without a terraform/config change -- LLM_API_KEY_SECRET_ARN
+    # is additive, not a breaking rename.
+    import importlib
+
+    env_backup = dict(os.environ)
+    try:
+        del os.environ["LLM_API_KEY_SECRET_ARN"]
+        os.environ["CLAUDE_API_KEY_SECRET_ARN"] = "arn:aws:secretsmanager:us-west-1:123456789012:secret:legacy-key"
+        reloaded = importlib.reload(lambda_function)
+        assert reloaded.LLM_API_KEY_SECRET_ARN == (
+            "arn:aws:secretsmanager:us-west-1:123456789012:secret:legacy-key"
+        )
+    finally:
+        os.environ.clear()
+        os.environ.update(env_backup)
+        importlib.reload(lambda_function)

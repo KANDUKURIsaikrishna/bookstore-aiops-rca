@@ -263,7 +263,7 @@ The GitHub Actions pipeline (`.github/workflows/ci-cd.yml`) runs, per push: secr
 | CI/CD pipeline | GitHub Secrets only | `AWS_ROLE_ARN`, `AWS_ACCOUNT_ID`, `API_URL` — no DB credentials in the pipeline at all |
 | Local development | `.env` file | Never committed; see `.gitignore` |
 | Terraform state | AWS Secrets Manager | RDS admin credentials at `/bookstore/db-credentials`, Grafana admin at `/bookstore/grafana-admin` |
-| RCA Lambda | AWS Secrets Manager (manual population) | Claude API key at `/bookstore/claude-api-key` — Terraform only creates the empty secret shell; a human pastes the real key in (`aws secretsmanager put-secret-value`) since it isn't derivable from anything Terraform has |
+| RCA Lambda | AWS Secrets Manager (manual population) | LLM API key at `/bookstore/llm-api-key` (Anthropic by default, or OpenAI/Gemini — see `llm_provider`) — Terraform only creates the empty secret shell; a human pastes the real key in (`aws secretsmanager put-secret-value`) since it isn't derivable from anything Terraform has |
 
 **Rule:** No credential, password, or account ID should ever appear in plain text in any committed file.
 
@@ -281,7 +281,7 @@ The GitHub Actions pipeline (`.github/workflows/ci-cd.yml`) runs, per push: secr
 | IaC security | Trivy's config scanner runs on every Terraform change |
 | Image provenance | Every pushed image signed with cosign (keyless, GitHub OIDC) — `cosign verify` proves which CI run built it |
 | Dependency freshness | Dependabot — weekly PRs across npm, pip, Terraform, Docker base images, GitHub Actions |
-| Account-level audit trail | CloudTrail, multi-region, log file validation on, S3 Object Lock (compliance mode) — see `terraform/cloudtrail.tf` |
+| Account-level audit trail | CloudTrail, multi-region, log file validation on — see `terraform/cloudtrail.tf`. S3 Object Lock (compliance mode) is available but off by default (`enable_cloudtrail_object_lock`), since it makes this project's own destroy-and-recreate dev workflow permanently orphan the bucket (see `docs/TROUBLESHOOTING.md` OBS-074) |
 | No static AWS keys | GitHub OIDC → IAM role assumption |
 | Secrets in-cluster | External Secrets Operator + AWS Secrets Manager |
 | Non-root containers | All pods run as non-root |

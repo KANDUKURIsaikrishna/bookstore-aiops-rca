@@ -199,6 +199,10 @@ module "eks" {
   node_desired_size  = 3 # t3.medium caps at 17 pods (ENI IP limit); 2 nodes (34 slots) filled up once all 5 microservices + api-gateway (2 replicas) joined the monolith — see TF-014, OBS-030
   region             = var.aws_region
 
+  enable_chaos_node_group = var.enable_chaos_node_group
+  chaos_node_max_size     = var.chaos_node_max_size
+  chaos_node_desired_size = var.chaos_node_desired_size
+
   # Whoever runs `terraform apply` always gets cluster-admin, regardless of who
   # originally created the cluster — see TF-013 in docs/phase-2-troubleshooting.md.
   admin_principal_arns = concat(
@@ -345,7 +349,7 @@ module "aiops_rca" {
   region            = var.aws_region
   account_id        = data.aws_caller_identity.current.account_id
 
-  claude_api_key               = var.claude_api_key
+  llm_api_key                  = var.llm_api_key
   secrets_recovery_window_days = var.secrets_recovery_window_days
 }
 

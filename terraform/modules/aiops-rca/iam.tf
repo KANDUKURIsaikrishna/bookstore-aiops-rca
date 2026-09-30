@@ -41,7 +41,7 @@ resource "aws_iam_role_policy" "rca_lambda_inline" {
       {
         Effect   = "Allow"
         Action   = "secretsmanager:GetSecretValue"
-        Resource = aws_secretsmanager_secret.claude_api_key.arn
+        Resource = aws_secretsmanager_secret.llm_api_key.arn
       },
       {
         Effect   = "Allow"

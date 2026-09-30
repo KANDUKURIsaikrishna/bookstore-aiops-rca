@@ -26,9 +26,10 @@ resource "aws_lambda_function" "rca" {
   environment {
     variables = {
       DYNAMODB_TABLE            = aws_dynamodb_table.rca_reports.name
-      CLAUDE_API_KEY_SECRET_ARN = aws_secretsmanager_secret.claude_api_key.arn
+      LLM_API_KEY_SECRET_ARN    = aws_secretsmanager_secret.llm_api_key.arn
       SES_FROM_EMAIL            = var.alert_email
       SES_TO_EMAIL              = var.alert_email
+      LLM_PROVIDER              = var.llm_provider
       CLAUDE_MODEL              = var.claude_model
       LOG_WINDOW_MINUTES        = tostring(var.log_window_minutes)
       REPORT_RETENTION_DAYS     = tostring(var.rca_report_retention_days)

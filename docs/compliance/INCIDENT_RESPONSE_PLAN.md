@@ -75,7 +75,7 @@ aws secretsmanager put-secret-value --secret-id /bookstore/db-credentials \
 
 After a manual rotation, every pod holding the old value via a mounted `ExternalSecret` needs a rolling restart to pick up the new one (ESO does not automatically restart consumers on a secret change): `kubectl rollout restart deployment -n <namespace>`.
 
-The same pattern applies to `/bookstore/grafana-admin`, `/bookstore/monitoring-basic-auth`, `/bookstore/jwt-secret`, and `/bookstore/claude-api-key` — rotate the value, then restart whatever consumes it (the monitoring EC2's Docker Compose stack for the first two, `api-gateway` for the JWT secret, the RCA Lambda for the Claude key — Lambda picks up a new Secrets Manager value on its next cold start, or immediately if the deployed code's in-memory cache is cleared by a redeploy).
+The same pattern applies to `/bookstore/grafana-admin`, `/bookstore/monitoring-basic-auth`, `/bookstore/jwt-secret`, and `/bookstore/llm-api-key` — rotate the value, then restart whatever consumes it (the monitoring EC2's Docker Compose stack for the first two, `api-gateway` for the JWT secret, the RCA Lambda for the LLM key — Lambda picks up a new Secrets Manager value on its next cold start, or immediately if the deployed code's in-memory cache is cleared by a redeploy).
 
 ### 5.3 Isolating a compromised node or service at the network layer
 

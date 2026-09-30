@@ -12,15 +12,24 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 DYNAMODB_TABLE = os.environ["DYNAMODB_TABLE"]
-CLAUDE_API_KEY_SECRET_ARN = os.environ["CLAUDE_API_KEY_SECRET_ARN"]
 SES_FROM_EMAIL = os.environ["SES_FROM_EMAIL"]
 SES_TO_EMAIL = os.environ["SES_TO_EMAIL"]
+# Provider swap -- LLM_* vars are the generic names; CLAUDE_* are the original
+# names and stay as the fallback so existing terraform/config.env deployments
+# (which only set CLAUDE_API_KEY_SECRET_ARN/CLAUDE_MODEL/CLAUDE_MAX_TOKENS)
+# keep working unchanged with the default provider (anthropic). Set
+# LLM_PROVIDER=openai|gemini plus LLM_MODEL and, if the key lives in a
+# differently-named secret, LLM_API_KEY_SECRET_ARN to switch providers.
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "anthropic").lower()
+LLM_API_KEY_SECRET_ARN = os.environ.get("LLM_API_KEY_SECRET_ARN") or os.environ["CLAUDE_API_KEY_SECRET_ARN"]
 # Haiku by default, not Sonnet -- this is a structured summarization task
 # (read N log lines, name a root cause, cite the lines), not deep multi-step
 # reasoning, and Haiku is dramatically cheaper per token. Override via
-# var.claude_model / CLAUDE_MODEL for a harder incident that genuinely needs
-# Sonnet's reasoning depth.
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+# var.claude_model / CLAUDE_MODEL (or LLM_MODEL) for a harder incident that
+# genuinely needs deeper reasoning, or when switching providers -- there's no
+# cross-provider default that makes sense, so this must be set explicitly
+# when LLM_PROVIDER isn't anthropic.
+LLM_MODEL = os.environ.get("LLM_MODEL") or os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 LOG_WINDOW_MINUTES = int(os.environ.get("LOG_WINDOW_MINUTES", "5"))
 REPORT_RETENTION_DAYS = int(os.environ.get("REPORT_RETENTION_DAYS", "400"))
 # Token-cost controls -- the dominant cost driver here is input tokens: up to
@@ -30,7 +39,7 @@ REPORT_RETENTION_DAYS = int(os.environ.get("REPORT_RETENTION_DAYS", "400"))
 # all 5 services (cross-service root-cause correlation).
 MAX_LOG_LINES_PER_SERVICE = int(os.environ.get("MAX_LOG_LINES_PER_SERVICE", "12"))
 MAX_LOG_LINE_CHARS = int(os.environ.get("MAX_LOG_LINE_CHARS", "400"))
-CLAUDE_MAX_TOKENS = int(os.environ.get("CLAUDE_MAX_TOKENS", "700"))
+LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS") or os.environ.get("CLAUDE_MAX_TOKENS", "700"))
 
 # Matches the tag Fluent Bit's own LOKI_HOST discovery loop filters on --
 # see terraform/modules/eks/node-user-data.sh.tftpl:73 and the monitoring
@@ -45,16 +54,16 @@ _dynamodb = boto3.resource("dynamodb")
 _ses = boto3.client("ses")
 _ec2 = boto3.client("ec2")
 
-_claude_api_key_cache = None
+_llm_api_key_cache = None
 _loki_host_cache = None
 
 
-def get_claude_api_key():
-    global _claude_api_key_cache
-    if _claude_api_key_cache is None:
-        response = _secrets_client.get_secret_value(SecretId=CLAUDE_API_KEY_SECRET_ARN)
-        _claude_api_key_cache = response["SecretString"]
-    return _claude_api_key_cache
+def get_llm_api_key():
+    global _llm_api_key_cache
+    if _llm_api_key_cache is None:
+        response = _secrets_client.get_secret_value(SecretId=LLM_API_KEY_SECRET_ARN)
+        _llm_api_key_cache = response["SecretString"]
+    return _llm_api_key_cache
 
 
 def get_loki_host():
@@ -109,14 +118,13 @@ def build_prompt(alert, logs_by_service):
     return "\n".join(sections)
 
 
-def call_claude(prompt, max_retries=3):
-    api_key = get_claude_api_key()
+def _build_anthropic_request(prompt, api_key):
     payload = json.dumps({
-        "model": CLAUDE_MODEL,
-        "max_tokens": CLAUDE_MAX_TOKENS,
+        "model": LLM_MODEL,
+        "max_tokens": LLM_MAX_TOKENS,
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
-    request = urllib.request.Request(
+    return urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
         data=payload,
         headers={
@@ -126,15 +134,82 @@ def call_claude(prompt, max_retries=3):
         },
         method="POST",
     )
+
+
+def _parse_anthropic_response(body):
+    return body["content"][0]["text"]
+
+
+def _build_openai_request(prompt, api_key):
+    payload = json.dumps({
+        "model": LLM_MODEL,
+        "max_tokens": LLM_MAX_TOKENS,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+    return urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "content-type": "application/json",
+        },
+        method="POST",
+    )
+
+
+def _parse_openai_response(body):
+    return body["choices"][0]["message"]["content"]
+
+
+def _build_gemini_request(prompt, api_key):
+    # Gemini takes the key as a query param, not a header -- its REST API has
+    # no bearer/x-api-key auth mode.
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": LLM_MAX_TOKENS},
+    }).encode()
+    url = (
+        f"https://generativelanguage.googleapis.com/v1/models/{LLM_MODEL}:generateContent"
+        f"?key={api_key}"
+    )
+    return urllib.request.Request(
+        url, data=payload, headers={"content-type": "application/json"}, method="POST"
+    )
+
+
+def _parse_gemini_response(body):
+    return body["candidates"][0]["content"]["parts"][0]["text"]
+
+
+# One entry per supported LLM_PROVIDER value: (request builder, response parser).
+# Both differ per-provider (auth scheme, payload shape, response shape) --
+# everything else (retry/backoff, error logging) is identical, so only these
+# two hooks vary.
+_LLM_PROVIDERS = {
+    "anthropic": (_build_anthropic_request, _parse_anthropic_response),
+    "openai": (_build_openai_request, _parse_openai_response),
+    "gemini": (_build_gemini_request, _parse_gemini_response),
+}
+
+
+def call_llm(prompt, max_retries=3):
+    try:
+        build_request, parse_response = _LLM_PROVIDERS[LLM_PROVIDER]
+    except KeyError:
+        raise ValueError(
+            f"Unsupported LLM_PROVIDER {LLM_PROVIDER!r} (expected one of {sorted(_LLM_PROVIDERS)})"
+        ) from None
+
+    request = build_request(prompt, get_llm_api_key())
     last_error = None
     for attempt in range(max_retries):
         try:
             with urllib.request.urlopen(request, timeout=30) as resp:
                 body = json.loads(resp.read())
-            return body["content"][0]["text"]
+            return parse_response(body)
         except Exception as exc:  # noqa: BLE001 -- any transient failure should retry, not just specific ones
             last_error = exc
-            logger.warning("Claude API call failed (attempt %d/%d): %s", attempt + 1, max_retries, exc)
+            logger.warning("%s API call failed (attempt %d/%d): %s", LLM_PROVIDER, attempt + 1, max_retries, exc)
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
     raise last_error
@@ -203,7 +278,7 @@ def handler(event, context):
         send_email(alert, narrative)
         return {"statusCode": 200, "body": json.dumps({"status": "no_logs_found"})}
 
-    narrative = call_claude(build_prompt(alert, logs_by_service))
+    narrative = call_llm(build_prompt(alert, logs_by_service))
     write_report(alert, narrative, log_references, status="ok")
     send_email(alert, narrative)
     return {"statusCode": 200, "body": json.dumps({"status": "ok"})}

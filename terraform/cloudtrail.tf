@@ -15,11 +15,32 @@
 # improves.
 
 resource "aws_s3_bucket" "cloudtrail" {
-  bucket = "bookstore-cloudtrail-${data.aws_caller_identity.current.account_id}"
+  # "-v2" is deliberate, not cosmetic: the original "bookstore-cloudtrail-
+  # <account_id>" name is permanently claimed by a bucket orphaned during
+  # this project's first live apply/destroy validation (2026-09-17) -- its
+  # objects were written while object_lock_enabled defaulted to true below,
+  # so that specific bucket can never be deleted before 2027-10-22 (400-day
+  # COMPLIANCE-mode retention) no matter what this file now says. Renaming
+  # avoids BucketAlreadyOwnedByYou colliding with that stuck bucket forever;
+  # it costs nothing (a handful of log objects, pennies/month) and needs no
+  # action -- its own lifecycle rule expires it on its own once the lock
+  # clears, and it isn't Terraform-managed so it can't block anything here.
+  bucket = "bookstore-cloudtrail-${data.aws_caller_identity.current.account_id}-v2"
 
   # Object Lock must be set at bucket creation -- can't be enabled after the
-  # fact without a full bucket recreate. Requires versioning (below).
-  object_lock_enabled = true
+  # fact without a full bucket recreate. Requires versioning (below). Off by
+  # default (var.enable_cloudtrail_object_lock) so this demo/dev-cycle stack
+  # can `terraform destroy` this bucket cleanly every time, no orphan, no
+  # manual `state rm` -- turn it on for a real audit-scoped deployment,
+  # understanding that a real destroy will then permanently orphan this
+  # bucket (by design -- see OBS-074) and need a bucket rename of its own.
+  object_lock_enabled = var.enable_cloudtrail_object_lock
+
+  # Harmless once object lock is on (AWS blocks the delete regardless of
+  # this flag during the retention window, so it's inert there) -- but with
+  # the lock off (the default here), this is what actually lets a plain
+  # `terraform destroy` remove every object version with no manual cleanup.
+  force_destroy = true
 }
 
 resource "aws_s3_bucket_versioning" "cloudtrail" {
@@ -51,8 +72,13 @@ resource "aws_s3_bucket_public_access_block" "cloudtrail" {
 # overwrite a log object before the retention period elapses. This is the
 # actual "immutable audit trail" auditors ask for, not just "encrypted and
 # access-controlled" (which stops external tampering but not an insider or a
-# compromised admin credential from covering their tracks).
+# compromised admin credential from covering their tracks). Off by default
+# (var.enable_cloudtrail_object_lock) -- see the bucket resource's own
+# comment on the tradeoff. docs/compliance/INFORMATION_SECURITY_POLICY.md's
+# cryptography section flags this as an open gap while it's off, same
+# pattern as var.enable_rds_secret_rotation.
 resource "aws_s3_bucket_object_lock_configuration" "cloudtrail" {
+  count  = var.enable_cloudtrail_object_lock ? 1 : 0
   bucket = aws_s3_bucket.cloudtrail.id
   rule {
     default_retention {
@@ -63,10 +89,12 @@ resource "aws_s3_bucket_object_lock_configuration" "cloudtrail" {
   depends_on = [aws_s3_bucket_versioning.cloudtrail]
 }
 
-# Cleanup only fires after the Object Lock retention window has passed --
-# S3 silently defers (not fails) any lifecycle expiration attempted while an
-# object is still under compliance-mode lock. A 35-day buffer over the lock
-# period avoids the delete and the lock expiring on the exact same day.
+# With the lock off (default), this is just ordinary cost-control cleanup --
+# `force_destroy` on the bucket resource is what actually empties it on a
+# real `terraform destroy`. With the lock on, S3 silently defers (not fails)
+# any lifecycle expiration attempted while an object is still locked; the
+# 35-day buffer over the lock period avoids the delete and the lock
+# expiring on the exact same day.
 resource "aws_s3_bucket_lifecycle_configuration" "cloudtrail" {
   bucket = aws_s3_bucket.cloudtrail.id
   rule {

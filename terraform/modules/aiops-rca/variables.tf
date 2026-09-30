@@ -29,9 +29,20 @@ variable "account_id" {
 }
 
 variable "claude_model" {
-  description = "Claude model ID the RCA Lambda calls. Defaults to Haiku, not Sonnet -- this is a structured log-summarization task, not deep multi-step reasoning, and Haiku costs dramatically less per token. Override to a Sonnet/Opus model ID for incidents that genuinely need deeper reasoning."
+  description = "Claude model ID the RCA Lambda calls. Defaults to Haiku, not Sonnet -- this is a structured log-summarization task, not deep multi-step reasoning, and Haiku costs dramatically less per token. Override to a Sonnet/Opus model ID for incidents that genuinely need deeper reasoning. Ignored when var.llm_provider isn't \"anthropic\" -- pass the other provider's model ID here instead (the Lambda reads whichever provider it's using out of this same field)."
   type        = string
   default     = "claude-haiku-4-5-20251001"
+}
+
+variable "llm_provider" {
+  description = "Which LLM API the RCA Lambda calls: \"anthropic\" (default), \"openai\", or \"gemini\". Switching providers still uses var.llm_api_key / the /bookstore/llm-api-key secret to hold whichever provider's key you're using, and var.claude_model to hold that provider's model ID -- only the provider selector itself is a separate variable."
+  type        = string
+  default     = "anthropic"
+
+  validation {
+    condition     = contains(["anthropic", "openai", "gemini"], var.llm_provider)
+    error_message = "llm_provider must be one of: anthropic, openai, gemini."
+  }
 }
 
 variable "log_window_minutes" {
@@ -58,15 +69,15 @@ variable "claude_max_tokens" {
   default     = 700
 }
 
-variable "claude_api_key" {
-  description = "Real Claude API key to populate /bookstore/claude-api-key with. Empty string (default) leaves the secret as an empty shell for manual population later -- set CLAUDE_API_KEY in config.env + run scripts/configure.py instead of hand-editing terraform.tfvars directly, same convention as every other config.env-sourced variable in this project."
+variable "llm_api_key" {
+  description = "Real API key (for whichever provider var.llm_provider selects) to populate /bookstore/llm-api-key with. Empty string (default) leaves the secret as an empty shell for manual population later -- set LLM_API_KEY in config.env + run scripts/configure.py instead of hand-editing terraform.tfvars directly, same convention as every other config.env-sourced variable in this project."
   type        = string
   default     = ""
   sensitive   = true
 }
 
 variable "secrets_recovery_window_days" {
-  description = "recovery_window_in_days for the claude_api_key secret. 0 = force delete (this project's dev-cycle default, see TF-012); 7-30 for a real production account."
+  description = "recovery_window_in_days for the llm_api_key secret. 0 = force delete (this project's dev-cycle default, see TF-012); 7-30 for a real production account."
   type        = number
   default     = 0
 }

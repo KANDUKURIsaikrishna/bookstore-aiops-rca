@@ -37,6 +37,10 @@ client/build/
 *.tfstate.*
 *.tfstate.backup
 .terraform/
+
+# Lambda zip build output (data.archive_file, regenerated every apply from
+# lambdas/*/lambda_function.py) — never committed
+terraform/modules/aiops-rca/build/
 # tfplan* (not just the bare "tfplan"/"*.tfplan" names) -- plan files can
 # contain sensitive resource values in plaintext (unlike `terraform show
 # -json`'s output, the raw plan file is never redacted) and easy to end up
@@ -90,3 +94,8 @@ project-explained.md
 # was previously tracked (commit b60c89f); untracked via `git rm --cached`
 # to match this rule going forward.
 docs/superpowers/
+
+# AWS resource/cost audit reports — contain account IDs, bucket names, and
+# billing data, never committed
+AWS_RESOURCE_AUDIT.md
+DESTROY_LOG.md

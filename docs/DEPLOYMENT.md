@@ -11,7 +11,7 @@ How to actually stand this project up, end to end, from a fresh AWS account. Thi
 - [Step 2 — Bootstrap Terraform state](#step-2--bootstrap-terraform-state-once-per-aws-account)
 - [Step 3 — Bootstrap the domain](#step-3--bootstrap-the-domain-once-per-domain-ever)
 - [Step 4 — One apply, everything](#step-4--one-apply-everything)
-- [Populate the Claude API key (RCA pipeline)](#populate-the-claude-api-key-rca-pipeline)
+- [Populate the LLM API key (RCA pipeline)](#populate-the-llm-api-key-rca-pipeline)
 - [Optional: harden for a real (non-demo) account](#optional-harden-for-a-real-non-demo-account)
 - [Step 5 — Configure GitHub Secrets & Variables](#step-5--configure-github-secrets--variables-for-cicd)
 - [Step 6 — Import known-conflicting entries](#step-6--import-known-conflicting-entries-if-re-deploying)
@@ -134,7 +134,7 @@ terraform plan -out=tfplan
 #   eks-addons (ESO, AWS Load Balancer Controller, ArgoCD, Argo Rollouts),
 #   monitoring EC2 + EIP, GitHub OIDC role,
 #   the ArgoCD AppProject + Application + ApplicationSet (kubectl_manifest, see below),
-#   aiops-rca: DynamoDB table + GSI, SQS DLQ, the Claude API key secret shell,
+#   aiops-rca: DynamoDB table + GSI, SQS DLQ, the LLM API key secret shell,
 #   the RCA Lambda + its VPC security group + IP-restricted webhook API Gateway,
 #   the dashboard-read Lambda + open HTTP API Gateway, S3 bucket + CloudFront
 #   distribution + OAC for the static dashboard (see ARCHITECTURE.md#aiops-rca-pipeline),
@@ -149,31 +149,31 @@ terraform apply tfplan
 
 RDS (~10-15 min) and EKS (~15-20 min) are the slow parts and provision concurrently, since neither depends on the other directly (both depend on `network`/`security`, not on each other). The `eks-addons` Helm releases run after the cluster is up, now fully concurrently with each other too (see [`ARCHITECTURE.md`](ARCHITECTURE.md#terraform-module-graph)). As long as Step 3's NS records were set and have propagated, `aws_acm_certificate_validation.ingress` resolves on its own within a few minutes — no manual registrar step here anymore (that used to be required after *every* destroy+recreate cycle, since the public zone was Terraform-managed and got brand-new NS values each time it was recreated; it's now a `data` lookup instead, see Step 3).
 
-### Populate the Claude API key (RCA pipeline)
+### Populate the LLM API key (RCA pipeline)
 
-A real Claude API key isn't derivable from anything Terraform has, so it always comes from a human. Two ways to set it — pick one:
+A real API key isn't derivable from anything Terraform has, so it always comes from a human. The RCA Lambda calls Anthropic's Claude API by default; set `llm_provider = "openai"` or `"gemini"` (plus a matching `claude_model` value) in `terraform.tfvars` to use a different provider's key instead — same secret, same steps below, whichever provider you've picked. Two ways to set it — pick one:
 
 **Preferred: set it in `config.env` before you apply.**
 
 ```bash
 # in config.env:
-CLAUDE_API_KEY=sk-ant-...
+LLM_API_KEY=sk-ant-...
 
 python3 scripts/configure.py   # regenerates terraform.tfvars with it
 terraform apply                # creates the secret's real value, not just the shell
 ```
 
-To rotate the key later, change `CLAUDE_API_KEY` in `config.env` and re-run both commands — no manual AWS CLI call needed. `config.env` and the `terraform.tfvars` it generates are both gitignored, so the key never touches git; `terraform plan`/`apply` never prints it either (the variable is `sensitive`). It does land in Terraform state, in the same encrypted S3 backend every other secret in this project's state already sits in (DB credentials, JWT secret, Grafana admin) — a deliberate, consistent tradeoff, not a new one.
+To rotate the key later, change `LLM_API_KEY` in `config.env` and re-run both commands — no manual AWS CLI call needed. `config.env` and the `terraform.tfvars` it generates are both gitignored, so the key never touches git; `terraform plan`/`apply` never prints it either (the variable is `sensitive`). It does land in Terraform state, in the same encrypted S3 backend every other secret in this project's state already sits in (DB credentials, JWT secret, Grafana admin) — a deliberate, consistent tradeoff, not a new one.
 
-**Alternative: leave `CLAUDE_API_KEY` blank and populate the secret by hand instead**, once, after apply:
+**Alternative: leave `LLM_API_KEY` blank and populate the secret by hand instead**, once, after apply:
 
 ```bash
 aws secretsmanager put-secret-value \
-  --secret-id /bookstore/claude-api-key \
+  --secret-id /bookstore/llm-api-key \
   --secret-string "sk-ant-..."
 ```
 
-Either way, until the secret has a real value, the RCA Lambda (triggered by Alertmanager on a firing alert) still runs, still queries Loki, and still writes a report — but the report's `narrative` field comes back as whatever error the Claude API call raised (auth failure), not a real root-cause analysis. Skip this entirely if you don't want the RCA pipeline live yet; nothing else in the stack depends on it.
+Either way, until the secret has a real value, the RCA Lambda (triggered by Alertmanager on a firing alert) still runs, still queries Loki, and still writes a report — but the report's `narrative` field comes back as whatever error the LLM API call raised (auth failure), not a real root-cause analysis. Skip this entirely if you don't want the RCA pipeline live yet; nothing else in the stack depends on it.
 
 By default the RCA Lambda calls Claude Haiku, not Sonnet (`var.claude_model`, cheaper per token — this is a log-summarization task, not deep reasoning) with `max_tokens` capped at 700 (`var.claude_max_tokens`) and the prompt capped at 12 log lines per service, 400 characters each (`var.max_log_lines_per_service` / `var.max_log_line_chars`) — the biggest cost lever for this pipeline is prompt size (up to 5 services' logs in one call), so these caps exist specifically to keep the token bill predictable regardless of how noisy a service's logging gets. Override any of them in `terraform.tfvars` if you want deeper (pricier) analysis for a harder incident.
 
@@ -380,16 +380,16 @@ cd terraform
 terraform destroy
 ```
 
-`module.route53.aws_route53_zone.public` no longer carries a `prevent_destroy` lifecycle block — `terraform destroy` tears down the public zone along with everything else, no refusal.
+**The public Route53 zone survives `terraform destroy` untouched** — `module.route53`'s public zone is `data "aws_route53_zone" "public"` (`terraform/modules/route53/main.tf`), a lookup, not a managed resource; Terraform never creates or destroys it (see Step 3). Confirmed live 2026-09-17: a full destroy left `b17catsvsdogs.xyz`'s zone, NS records, and registrar delegation completely untouched — no re-pointing needed on the next apply. (An older revision of this doc claimed the opposite — that the zone got torn down and rebuilt with new nameservers every cycle — that was true before this data-lookup refactor and is no longer accurate.)
 
-> **Real consequence:** the next `apply` creates a **brand-new zone with brand-new, randomly-assigned nameserver values**, and your domain registrar needs to be re-pointed at them again before ACM certificate validation (and anything depending on it, like the ALB's TLS listener) can complete. Grab `terraform output route53_public_name_servers` and update the registrar as early in the apply as possible, not after it finishes — DNS propagation can take anywhere from minutes to hours, and doing it early lets that time overlap with RDS/EKS provisioning (~20-30 min) instead of adding to the total.
+**`aws_s3_bucket.cloudtrail` destroys cleanly by default** — `var.enable_cloudtrail_object_lock` defaults to `false` specifically so this project's destroy-and-recreate dev workflow (`make apply` → verify → `make destroy`, repeat) leaves nothing behind; `force_destroy = true` on the bucket empties it on every `terraform destroy`, no manual steps, no orphan. **If you turn `enable_cloudtrail_object_lock` on** (a real audit-scoped deployment, where the whole point is that CloudTrail logs can't be deleted), the tradeoff flips completely: `terraform destroy` will then fail on this bucket specifically with `BucketNotEmpty`, every time, permanently, for as long as any logged event is still inside `var.cloudtrail_retention_days` — confirmed live 2026-09-17, and not a bug; it's what "immutable audit trail" means. `make destroy` handles that case automatically (runs the destroy, then unconditionally `terraform state rm`s the bucket so it can't block the next `plan`/`apply`; `make apply`/`make import` re-adopts the same surviving bucket on the next cycle) — but if you're running `terraform destroy` directly instead of `make destroy` with the lock enabled, run `terraform state rm aws_s3_bucket.cloudtrail` yourself afterward. See `docs/TROUBLESHOOTING.md` OBS-074 for the full incident, including why the bucket is named `bookstore-cloudtrail-<account_id>-v2` (the un-suffixed name is permanently claimed by a bucket orphaned during this exact discovery).
 
 This project's Terraform has real destroy-safety automation baked in specifically because this stack gets destroyed and recreated often during development:
 
 - Ingress/ALB release before VPC teardown
-- `recovery_window_in_days = 0` on Secrets Manager entries
+- `recovery_window_in_days = 0` on Secrets Manager entries (`var.secrets_recovery_window_days`, still overridable for a real account)
 
-`make destroy` runs it with `-auto-approve`; use the plain command if you want the interactive confirmation.
+`make destroy` runs it with `-auto-approve` (plus the CloudTrail-bucket handling above); use the plain `terraform destroy` command if you want the interactive confirmation, but then handle the CloudTrail bucket manually as described above.
 
 Since `argocd.tf`'s `kubectl_manifest` resources are now what created the ArgoCD `Application`/`ApplicationSet` objects, `terraform destroy` also deletes them — and both carry `resources-finalizer.argocd.argoproj.io`, so ArgoCD deletes everything it manages (all of `k8s/overlays/prod` and every `k8s/services/*/overlays/prod`) before the `Application` object itself actually goes away. This happens automatically, in the right order, before `eks-addons`/`eks` get torn down (Terraform destroys in reverse-dependency order).
 

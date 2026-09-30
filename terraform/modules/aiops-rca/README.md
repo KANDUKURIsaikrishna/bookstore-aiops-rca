@@ -1,16 +1,23 @@
 # aiops-rca
 
-AIOps root-cause-analysis pipeline: an IP-restricted API Gateway webhook receives Alertmanager's firing alerts and invokes a VPC-attached Lambda that queries Loki, calls the Claude API, writes a narrative report to DynamoDB, and emails it via SES — failed invocations land in an SQS DLQ. A second, non-VPC Lambda behind an open HTTP API serves those reports to a static S3+CloudFront dashboard. This module never references anything from `monitoring-ec2` (see [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md#aiops-rca-pipeline) for the full flow and why the dependency between the two only ever runs one way).
+AIOps root-cause-analysis pipeline: an IP-restricted API Gateway webhook receives Alertmanager's firing alerts and invokes a VPC-attached Lambda that queries Loki, calls an LLM API (Anthropic Claude by default; OpenAI/Gemini via `var.llm_provider`), writes a narrative report to DynamoDB, and emails it via SES — failed invocations land in an SQS DLQ. A second, non-VPC Lambda behind an open HTTP API serves those reports to a static S3+CloudFront dashboard. This module never references anything from `monitoring-ec2` (see [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md#aiops-rca-pipeline) for the full flow and why the dependency between the two only ever runs one way).
 
 
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
 
-| Name | Version |
-|------|---------|
-| <a name="requirement_archive"></a> [archive](#requirement\_archive) | ~> 2.4 |
+No requirements.
 
-The `archive` provider itself is declared once, in the root `terraform/versions.tf` — not here — but this is the module that actually exercises it: both `data "archive_file"` resources below zip a Lambda's source straight from `lambdas/` at plan/apply time.
+## Providers
+
+| Name | Version |
+| ---- | ------- |
+| <a name="provider_archive"></a> [archive](#provider\_archive) | n/a |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | n/a |
+
+## Modules
+
+No modules.
 
 ## Resources
 
@@ -43,14 +50,17 @@ The `archive` provider itself is declared once, in the root `terraform/versions.
 | [aws_s3_bucket.dashboard](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket) | resource |
 | [aws_s3_bucket_policy.dashboard](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_policy) | resource |
 | [aws_s3_bucket_public_access_block.dashboard](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_public_access_block) | resource |
+| [aws_s3_bucket_server_side_encryption_configuration.dashboard](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_server_side_encryption_configuration) | resource |
+| [aws_s3_bucket_versioning.dashboard](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_versioning) | resource |
 | [aws_s3_object.dashboard_index](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_object) | resource |
 | [aws_s3_object.dashboard_script](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_object) | resource |
 | [aws_s3_object.dashboard_style](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_object) | resource |
-| [aws_secretsmanager_secret.claude_api_key](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret) | resource |
+| [aws_secretsmanager_secret.llm_api_key](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret) | resource |
+| [aws_secretsmanager_secret_version.llm_api_key](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/secretsmanager_secret_version) | resource |
 | [aws_security_group.rca_lambda](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
 | [aws_sqs_queue.rca_dlq](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sqs_queue) | resource |
-| [data.archive_file.dashboard_read_lambda](https://registry.terraform.io/providers/hashicorp/archive/latest/docs/data-sources/file) | data source |
-| [data.archive_file.rca_lambda](https://registry.terraform.io/providers/hashicorp/archive/latest/docs/data-sources/file) | data source |
+| [archive_file.dashboard_read_lambda](https://registry.terraform.io/providers/hashicorp/archive/latest/docs/data-sources/file) | data source |
+| [archive_file.rca_lambda](https://registry.terraform.io/providers/hashicorp/archive/latest/docs/data-sources/file) | data source |
 
 ## Inputs
 
@@ -58,10 +68,17 @@ The `archive` provider itself is declared once, in the root `terraform/versions.
 | ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_account_id"></a> [account\_id](#input\_account\_id) | AWS account ID, used to make the dashboard S3 bucket name globally unique | `string` | n/a | yes |
 | <a name="input_alert_email"></a> [alert\_email](#input\_alert\_email) | Address RCA emails are sent from and to — same verified address Alertmanager's SMTP already uses (SES sandbox requires both sender and recipient verified) | `string` | n/a | yes |
-| <a name="input_claude_model"></a> [claude\_model](#input\_claude\_model) | Claude model ID the RCA Lambda calls | `string` | `"claude-sonnet-5"` | no |
+| <a name="input_claude_max_tokens"></a> [claude\_max\_tokens](#input\_claude\_max\_tokens) | max\_tokens on the Claude API call -- caps output token cost. 700 is comfortable for a root-cause + affected-tier + suggested-fix answer with line citations. | `number` | `700` | no |
+| <a name="input_claude_model"></a> [claude\_model](#input\_claude\_model) | Claude model ID the RCA Lambda calls. Defaults to Haiku, not Sonnet -- this is a structured log-summarization task, not deep multi-step reasoning, and Haiku costs dramatically less per token. Override to a Sonnet/Opus model ID for incidents that genuinely need deeper reasoning. Ignored when var.llm\_provider isn't "anthropic" -- pass the other provider's model ID here instead (the Lambda reads whichever provider it's using out of this same field). | `string` | `"claude-haiku-4-5-20251001"` | no |
 | <a name="input_lambda_subnet_ids"></a> [lambda\_subnet\_ids](#input\_lambda\_subnet\_ids) | Private subnet IDs for the RCA Lambda's VPC config — reuses the existing RDS subnets (module.network.private\_subnet\_ids[4:6]), which already have NAT egress and no EC2 vCPU quota implications since Lambda ENIs don't count against it | `list(string)` | n/a | yes |
+| <a name="input_llm_api_key"></a> [llm\_api\_key](#input\_llm\_api\_key) | Real API key (for whichever provider var.llm\_provider selects) to populate /bookstore/llm-api-key with. Empty string (default) leaves the secret as an empty shell for manual population later -- set LLM\_API\_KEY in config.env + run scripts/configure.py instead of hand-editing terraform.tfvars directly, same convention as every other config.env-sourced variable in this project. | `string` | `""` | no |
+| <a name="input_llm_provider"></a> [llm\_provider](#input\_llm\_provider) | Which LLM API the RCA Lambda calls: "anthropic" (default), "openai", or "gemini". Switching providers still uses var.llm\_api\_key / the /bookstore/llm-api-key secret to hold whichever provider's key you're using, and var.claude\_model to hold that provider's model ID -- only the provider selector itself is a separate variable. | `string` | `"anthropic"` | no |
 | <a name="input_log_window_minutes"></a> [log\_window\_minutes](#input\_log\_window\_minutes) | Minutes before/after the alert's firing timestamp to query Loki for (spec: ±5 min) | `number` | `5` | no |
+| <a name="input_max_log_line_chars"></a> [max\_log\_line\_chars](#input\_max\_log\_line\_chars) | Cap on characters per individual log line included in the Claude prompt -- truncates (not drops) any single line longer than this, so one verbose stack-trace line can't blow out the token budget on its own. | `number` | `400` | no |
+| <a name="input_max_log_lines_per_service"></a> [max\_log\_lines\_per\_service](#input\_max\_log\_lines\_per\_service) | Cap on log lines per service included in the Claude prompt. The dominant token-cost driver here is prompt size (up to 5 services' logs in one prompt) -- this bounds it regardless of how noisy a service's logging is, without dropping any service from the cross-service correlation the RCA pipeline is built around. | `number` | `12` | no |
+| <a name="input_rca_report_retention_days"></a> [rca\_report\_retention\_days](#input\_rca\_report\_retention\_days) | Days an RCA report survives in DynamoDB before TTL deletes it. RCA reports may contain raw log excerpts (potentially including request data routed through the Claude API) -- see docs/compliance/DATA\_CLASSIFICATION\_RETENTION\_POLICY.md for the retention rationale. 400 matches this project's CloudTrail retention baseline (1 year + margin) since a report is itself an incident/audit artifact. | `number` | `400` | no |
 | <a name="input_region"></a> [region](#input\_region) | AWS region | `string` | n/a | yes |
+| <a name="input_secrets_recovery_window_days"></a> [secrets\_recovery\_window\_days](#input\_secrets\_recovery\_window\_days) | recovery\_window\_in\_days for the llm\_api\_key secret. 0 = force delete (this project's dev-cycle default, see TF-012); 7-30 for a real production account. | `number` | `0` | no |
 | <a name="input_ses_identity_arn"></a> [ses\_identity\_arn](#input\_ses\_identity\_arn) | ARN of the already-verified SES email identity (aws\_sesv2\_email\_identity.alerts) the RCA Lambda sends from | `string` | n/a | yes |
 | <a name="input_vpc_id"></a> [vpc\_id](#input\_vpc\_id) | VPC the RCA Lambda's ENIs are attached in (needed to reach Loki on the monitoring EC2 over its private IP) | `string` | n/a | yes |
 
@@ -69,7 +86,7 @@ The `archive` provider itself is declared once, in the root `terraform/versions.
 
 | Name | Description |
 | ---- | ----------- |
-| <a name="output_dashboard_read_api_url"></a> [dashboard\_read\_api\_url](#output\_dashboard\_read\_api\_url) | Base URL of the dashboard-read HTTP API — the static dashboard's script.js calls $${this}/reports |
+| <a name="output_dashboard_read_api_url"></a> [dashboard\_read\_api\_url](#output\_dashboard\_read\_api\_url) | Base URL of the dashboard-read HTTP API — the static dashboard's script.js calls ${this}/reports |
 | <a name="output_dashboard_url"></a> [dashboard\_url](#output\_dashboard\_url) | CloudFront URL serving the static RCA dashboard |
 | <a name="output_lambda_security_group_id"></a> [lambda\_security\_group\_id](#output\_lambda\_security\_group\_id) | Security group ID attached to the RCA Lambda's ENIs — monitoring-ec2's SG needs an ingress rule from this to allow the Lambda to reach Loki on port 3100 |
 | <a name="output_reports_table_name"></a> [reports\_table\_name](#output\_reports\_table\_name) | DynamoDB table name holding RCA reports |

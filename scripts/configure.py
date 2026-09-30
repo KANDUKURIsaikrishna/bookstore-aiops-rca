@@ -83,7 +83,7 @@ def main():
     alert_email      = cfg["ALERT_EMAIL"]
     github_branch    = cfg.get("GITHUB_BRANCH") or "main"
     secondary_region = cfg.get("SECONDARY_REGION") or "us-west-2"
-    claude_api_key   = cfg.get("CLAUDE_API_KEY") or ""
+    llm_api_key      = cfg.get("LLM_API_KEY") or cfg.get("CLAUDE_API_KEY") or ""
 
     print(f"\nConfiguring project with:")
     print(f"  Account    : {account_id}")
@@ -93,7 +93,7 @@ def main():
     print(f"  Repo       : {github_repo}")
     print(f"  Branch     : {github_branch}")
     print(f"  Alerts     : {alert_email}")
-    print(f"  Claude key : {'(set)' if claude_api_key else '(not set -- RCA narratives skipped until populated)'}")
+    print(f"  LLM key    : {'(set)' if llm_api_key else '(not set -- RCA narratives skipped until populated)'}")
     print()
 
     # ── 1. terraform/terraform.tfvars ────────────────────────────────────────
@@ -110,7 +110,7 @@ def main():
         f'domain           = "{domain}"\n'
         f'github_repo      = "{github_repo}"\n'
         f'alert_email      = "{alert_email}"\n'
-        f'claude_api_key   = "{claude_api_key}"\n',
+        f'llm_api_key      = "{llm_api_key}"\n',
         encoding="utf-8",
     )
     print(f"  [ok]  terraform/terraform.tfvars  (generated)")
@@ -197,9 +197,9 @@ the apply itself, and the post-apply verification steps.
 Note: config.env and terraform/terraform.tfvars are gitignored -- never
 commit them. This is a config-drift script, not a one-time fix: re-run it
 any time config.env changes (new domain, new AWS account, new repo, new
-branch, a rotated Claude API key), and remember to commit + push the k8s/
+branch, a rotated LLM API key), and remember to commit + push the k8s/
 changes it makes -- ArgoCD only ever syncs from git, never from local disk.
-A CLAUDE_API_KEY change alone needs no k8s/ commit -- just `terraform apply`
+An LLM_API_KEY change alone needs no k8s/ commit -- just `terraform apply`
 after this script (it only touches terraform.tfvars, a Lambda's env var and
 a Secrets Manager value, not anything ArgoCD deploys).
 """)
