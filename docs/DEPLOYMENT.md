@@ -301,8 +301,9 @@ If images haven't been built/pushed by CI yet (first-ever deploy, before any CI 
 
 ```bash
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-west-1.amazonaws.com"
-aws ecr get-login-password --region us-west-1 | docker login --username AWS --password-stdin "$REGISTRY"
+AWS_REGION=$(grep '^AWS_REGION=' config.env | cut -d= -f2)   # whatever you set in Step 1 -- never hardcode this
+REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
 
 # Frontend
 docker build -t "$REGISTRY/bookstore-frontend:manual" client/

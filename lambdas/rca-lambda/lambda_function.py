@@ -302,9 +302,34 @@ def parse_alertmanager_payload(event):
         "alert_id": first.get("fingerprint", labels.get("alertname", "unknown")),
         "alertname": labels.get("alertname", "unknown"),
         "service": labels.get("service", labels.get("job", "unknown")),
+        # Pod-level alerts (PodCrashLooping, HighPodCPUUsage, HighPodMemoryUsage --
+        # anything sourced from kube-state-metrics/cAdvisor) carry a "pod" label
+        # and never a "service" label, and can fire on ANY pod in the cluster,
+        # not just one of the 5 named bookstore microservices. See
+        # _log_search_targets -- this is what lets those alerts find their own
+        # logs instead of always coming back "no logs found".
+        "pod": labels.get("pod", ""),
         "severity": labels.get("severity", "unknown"),
         "firing_timestamp": first.get("startsAt", datetime.now(timezone.utc).isoformat()),
     }
+
+
+def _log_search_targets(alert):
+    # Always search the 5 known bookstore services (HighRequestRate/
+    # HighErrorRate's own "service" label is always one of these, and a
+    # pod-level alert on a bookstore pod might still be worth
+    # cross-referencing against the others). Additionally search the
+    # alert's own pod name when present -- the only way a pod-level alert
+    # on a non-bookstore pod (ArgoCD, the AWS Load Balancer Controller,
+    # kube-system, ...) ever finds its own logs, since none of those pods'
+    # names are in SERVICES. Confirmed live 2026-10-01 (see
+    # docs/TROUBLESHOOTING.md): without this, HighPodCPUUsage firing on
+    # ArgoCD's own controller always came back "no logs found".
+    targets = list(SERVICES)
+    pod = alert.get("pod")
+    if pod and pod not in targets:
+        targets.append(pod)
+    return targets
 
 
 def handler(event, context):
@@ -318,7 +343,7 @@ def handler(event, context):
     start_ns = int((fired_at - timedelta(minutes=LOG_WINDOW_MINUTES)).timestamp() * 1e9)
     end_ns = int((fired_at + timedelta(minutes=LOG_WINDOW_MINUTES)).timestamp() * 1e9)
 
-    logs_by_service = {service: query_loki(service, start_ns, end_ns) for service in SERVICES}
+    logs_by_service = {target: query_loki(target, start_ns, end_ns) for target in _log_search_targets(alert)}
     # Same cap as build_prompt's -- the stored report should reflect exactly
     # the evidence Claude actually saw, not a different, larger slice.
     log_references = [line for lines in logs_by_service.values() for line in lines[:MAX_LOG_LINES_PER_SERVICE]]

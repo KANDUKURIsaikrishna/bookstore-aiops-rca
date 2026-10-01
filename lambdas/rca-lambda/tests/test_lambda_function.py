@@ -55,6 +55,69 @@ def make_alertmanager_event():
     }
 
 
+def make_pod_level_alertmanager_event(pod="argocd-application-controller-0", alertname="HighPodCPUUsage"):
+    # PodCrashLooping / HighPodCPUUsage / HighPodMemoryUsage all carry
+    # namespace+pod labels from kube-state-metrics/cAdvisor, never a
+    # "service" label -- they can fire on ANY pod in the cluster, not just
+    # one of the 5 named bookstore microservices (confirmed live
+    # 2026-10-01: HighPodCPUUsage fired on ArgoCD's own controller, which
+    # was busy-looping on a failed sync -- "no logs found" resulted,
+    # because the old fixed-SERVICES-list search had no way to look for
+    # that pod's own name).
+    return {
+        "body": json.dumps({
+            "alerts": [{
+                "fingerprint": "pod-level-123",
+                "startsAt": "2026-09-12T10:00:00Z",
+                "labels": {"alertname": alertname, "namespace": "argocd", "pod": pod, "severity": "warning"},
+            }]
+        })
+    }
+
+
+def test_parse_alertmanager_payload_extracts_pod_label():
+    alert = lambda_function.parse_alertmanager_payload(make_pod_level_alertmanager_event())
+    assert alert["pod"] == "argocd-application-controller-0"
+
+
+def test_parse_alertmanager_payload_pod_defaults_empty_when_absent():
+    alert = lambda_function.parse_alertmanager_payload(make_alertmanager_event())
+    assert alert["pod"] == ""
+
+
+def test_log_search_targets_includes_pod_name_alongside_the_known_services():
+    alert = {"service": "unknown", "pod": "argocd-application-controller-0"}
+    targets = lambda_function._log_search_targets(alert)
+    assert "argocd-application-controller-0" in targets
+    assert set(lambda_function.SERVICES).issubset(set(targets))
+
+
+def test_log_search_targets_is_just_the_known_services_when_no_pod_label():
+    alert = {"service": "order-service", "pod": ""}
+    assert lambda_function._log_search_targets(alert) == list(lambda_function.SERVICES)
+
+
+def test_handler_finds_logs_by_pod_name_for_alerts_with_no_service_label(dynamodb_table):
+    # The alert's own pod name must be searched, not just the 5 bookstore
+    # service names -- otherwise an alert on any non-bookstore pod (ArgoCD,
+    # the AWS Load Balancer Controller, kube-system, ...) always produces
+    # "no logs found" even when that pod's own logs explain exactly what
+    # happened.
+    def fake_query_loki(target, *_):
+        if target == "argocd-application-controller-0":
+            return ['level=warning msg="Skipping auto-sync: failed previous sync attempt"']
+        return []
+
+    with patch("lambda_function.query_loki", side_effect=fake_query_loki), \
+         patch("lambda_function.call_llm", return_value="Root cause: ArgoCD sync lockout.") as mock_llm, \
+         patch("lambda_function._ses") as mock_ses:
+        result = lambda_function.handler(make_pod_level_alertmanager_event(), None)
+
+    assert json.loads(result["body"])["status"] == "ok"
+    mock_llm.assert_called_once()
+    mock_ses.send_email.assert_called_once()
+
+
 def test_handler_writes_no_logs_report_when_loki_returns_nothing(dynamodb_table):
     with patch("lambda_function.query_loki", return_value=[]), \
          patch("lambda_function._ses") as mock_ses:
@@ -340,6 +403,7 @@ def test_parse_alertmanager_payload_extracts_expected_fields():
         "alert_id": "abc123",
         "alertname": "HighErrorRate",
         "service": "order-service",
+        "pod": "",
         "severity": "critical",
         "firing_timestamp": "2026-09-12T10:00:00Z",
     }

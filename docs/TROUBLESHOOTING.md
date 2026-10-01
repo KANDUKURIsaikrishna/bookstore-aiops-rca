@@ -40,6 +40,7 @@ IDs are **not sequential or complete**. Gaps in the numbering (e.g. no OBS-001/0
 - [OBS-077 — Gemini model retirement breaks the RCA Lambda with a 404](#obs-077--gemini-model-retirement-breaks-the-rca-lambda-with-a-404)
 - [OBS-078 — Gemini `thinkingConfig` rejected by Lite model variants, and thought-part narrative corruption](#obs-078--gemini-thinkingconfig-rejected-by-lite-model-variants-and-thought-part-narrative-corruption)
 - [OBS-079 — no idempotency on repeated webhook retries burns LLM quota fast](#obs-079--no-idempotency-on-repeated-webhook-retries-burns-llm-quota-fast)
+- [OBS-080 — pod-level alerts on non-bookstore pods always came back "no logs found"](#obs-080--pod-level-alerts-on-non-bookstore-pods-always-came-back-no-logs-found)
 
 **TF**
 - [TF-001 — concurrent Helm installs on a single-node cluster](#tf-001--concurrent-helm-installs-on-a-single-node-cluster)
@@ -317,6 +318,14 @@ One irreversible side effect from discovering this live: the account's default b
 **Root cause:** two compounding gaps. (1) `handler()` had no concept of "this alert_id was already analyzed" — every duplicate notification re-queried Loki and re-called the LLM from scratch, even though nothing about the incident had changed since the last successful analysis. (2) `call_llm`'s retry loop treated every exception the same way, including `429`/permanent `4xx` errors that retrying can never fix (the same malformed or rate-limited request just fails the same way three times instead of once).
 
 **Fix:** `handler()` now calls `has_ok_report(alert_id)` first — a DynamoDB `Query` on the existing hash key — and returns `{"status": "skipped_duplicate"}` immediately if a successful report already exists for that alert, with no Loki query, no LLM call, and no email. `call_llm` now raises immediately (no retry, no sleep) on any `4xx` or on `503` — only genuine transient failures (timeouts, other `5xx`) still get the short in-invocation retry. Adding the `Query` call surfaced a second small gap: the Lambda's IAM role only ever had `dynamodb:PutItem` (it never needed to read before); `terraform/modules/aiops-rca/iam.tf` now also grants `dynamodb:Query` on the same table resource.
+
+### OBS-080 — pod-level alerts on non-bookstore pods always came back "no logs found"
+
+**Symptom:** confirmed live 2026-10-01 — a real `HighPodCPUUsage` alert fired and the RCA email came back `"No logs found for HighPodCPUUsage in the 10-minute window around 2026-10-01T17:43:40.019Z."`, even though the pod that actually spiked CPU (almost certainly ArgoCD's `application-controller`, busy-looping on the same failed-sync lockout as OBS-076's logs showed) had plenty of its own log lines in that exact window.
+
+**Root cause:** `handler()` always built `logs_by_service` by querying Loki for the 5 hardcoded bookstore microservice names (`SERVICES`) and nothing else, regardless of what the firing alert was actually about. `PodCrashLooping`/`HighPodCPUUsage`/`HighPodMemoryUsage` (anything sourced from kube-state-metrics/cAdvisor, grouped `by(namespace, pod)`) carry a `pod` label and **never** a `service` label — they can fire on any pod in the cluster, not just one of the 5 named ones. `parse_alertmanager_payload` had nowhere to put that `pod` label, and `query_loki`'s literal substring match (`|= "<service>"`) never had a reason to search for it, so an alert on any non-bookstore pod (ArgoCD, the AWS Load Balancer Controller, `kube-system`, ...) was structurally guaranteed to find nothing, no matter how informative that pod's own logs were.
+
+**Fix:** `parse_alertmanager_payload` now also extracts `labels.pod` into `alert["pod"]` (empty string when absent — `HighRequestRate`/`HighErrorRate` alerts never have one, and that's fine, their own `service` label already is one of the 5). A new `_log_search_targets(alert)` returns `SERVICES` plus the alert's own `pod` name when present and not already in that list, and `handler()` queries Loki over that combined list instead of the bare `SERVICES` constant. Purely additive — existing alerts that already had a correct `service` label see no behavior change at all.
 
 ---
 
