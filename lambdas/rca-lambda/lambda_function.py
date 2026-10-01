@@ -7,6 +7,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import boto3
+from boto3.dynamodb.conditions import Key
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -164,12 +165,18 @@ def _parse_openai_response(body):
 def _build_gemini_request(prompt, api_key):
     # Gemini takes the key as a query param, not a header -- its REST API has
     # no bearer/x-api-key auth mode.
+    # No thinkingConfig here -- it's model-dependent (some Gemini variants,
+    # e.g. "lite" ones, reject it outright with a 400 INVALID_ARGUMENT;
+    # confirmed live 2026-10-01 switching models). _parse_gemini_response
+    # already skips any "thought" parts a thinking-capable model returns,
+    # which is harmless/a no-op for models that never emit one -- that's
+    # the portable fix, not a request-shape change that varies per model.
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"maxOutputTokens": LLM_MAX_TOKENS},
     }).encode()
     url = (
-        f"https://generativelanguage.googleapis.com/v1/models/{LLM_MODEL}:generateContent"
+        f"https://generativelanguage.googleapis.com/v1beta/models/{LLM_MODEL}:generateContent"
         f"?key={api_key}"
     )
     return urllib.request.Request(
@@ -178,7 +185,16 @@ def _build_gemini_request(prompt, api_key):
 
 
 def _parse_gemini_response(body):
-    return body["candidates"][0]["content"]["parts"][0]["text"]
+    # "Thinking" models (e.g. gemini-3.x) can return multiple parts per
+    # candidate -- internal reasoning parts marked "thought": true, plus the
+    # actual final-answer part(s). parts[0] alone can be a mid-reasoning
+    # fragment, not the answer -- confirmed live (2026-10-01 chaos/RCA
+    # validation drill): a bare parts[0] read produced a 54-character
+    # garbled fragment as the entire "narrative". Skip thought parts and
+    # join whatever's left.
+    parts = body["candidates"][0]["content"]["parts"]
+    answer_parts = [p["text"] for p in parts if not p.get("thought") and p.get("text")]
+    return "\n".join(answer_parts) if answer_parts else parts[0]["text"]
 
 
 # One entry per supported LLM_PROVIDER value: (request builder, response parser).
@@ -207,6 +223,26 @@ def call_llm(prompt, max_retries=3):
             with urllib.request.urlopen(request, timeout=30) as resp:
                 body = json.loads(resp.read())
             return parse_response(body)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")
+            logger.warning(
+                "%s API call failed (attempt %d/%d): %s %s",
+                LLM_PROVIDER, attempt + 1, max_retries, exc, detail,
+            )
+            if exc.code < 500 or exc.code == 503:
+                # Any 4xx (bad request, auth, not found, rate limited) is a
+                # permanent failure for this exact request -- the same
+                # request will get the same error every time, so retrying
+                # 3x just burns 3x the quota for nothing. Confirmed live
+                # (2026-10-01): a 400 from an unsupported request field
+                # still retried 3 times before this existed. 503 gets the
+                # same fail-fast treatment -- it means overloaded, and
+                # piling on more requests from the same invocation makes
+                # that worse, not better. Alertmanager's own much slower
+                # retry-on-failure loop (minutes apart) is the right retry
+                # for all of these, not this loop.
+                raise
+            last_error = exc
         except Exception as exc:  # noqa: BLE001 -- any transient failure should retry, not just specific ones
             last_error = exc
             logger.warning("%s API call failed (attempt %d/%d): %s", LLM_PROVIDER, attempt + 1, max_retries, exc)
@@ -245,6 +281,19 @@ def write_report(alert, narrative, log_references, status):
     })
 
 
+def has_ok_report(alert_id):
+    # Alertmanager re-POSTs the same still-firing alert (same fingerprint)
+    # on every retry cycle until a webhook call succeeds -- and keeps
+    # re-POSTing on later failures too. Without this check, each of those
+    # duplicate notifications re-runs the full Loki-query + LLM-call
+    # pipeline for an alert that's already been analyzed, multiplying cost
+    # for zero new information. Confirmed live (2026-10-01): one flapping
+    # alert generated ~30 LLM calls in 11 minutes before this existed.
+    table = _dynamodb.Table(DYNAMODB_TABLE)
+    response = table.query(KeyConditionExpression=Key("alert_id").eq(alert_id))
+    return any(item.get("status") == "ok" for item in response.get("Items", []))
+
+
 def parse_alertmanager_payload(event):
     body = json.loads(event["body"]) if isinstance(event.get("body"), str) else event
     first = body.get("alerts", [body])[0]
@@ -260,6 +309,11 @@ def parse_alertmanager_payload(event):
 
 def handler(event, context):
     alert = parse_alertmanager_payload(event)
+
+    if has_ok_report(alert["alert_id"]):
+        logger.info("Skipping re-analysis for alert_id=%s -- already has a successful report", alert["alert_id"])
+        return {"statusCode": 200, "body": json.dumps({"status": "skipped_duplicate"})}
+
     fired_at = datetime.fromisoformat(alert["firing_timestamp"].replace("Z", "+00:00"))
     start_ns = int((fired_at - timedelta(minutes=LOG_WINDOW_MINUTES)).timestamp() * 1e9)
     end_ns = int((fired_at + timedelta(minutes=LOG_WINDOW_MINUTES)).timestamp() * 1e9)

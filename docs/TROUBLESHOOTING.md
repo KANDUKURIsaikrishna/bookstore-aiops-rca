@@ -35,6 +35,11 @@ IDs are **not sequential or complete**. Gaps in the numbering (e.g. no OBS-001/0
 - [OBS-072 — literal `${this}` in an output description parsed as HCL interpolation](#obs-072--literal-this-in-an-output-description-parsed-as-hcl-interpolation)
 - [OBS-073 — Lambda test suites: pytest import path and moto region mismatch](#obs-073--lambda-test-suites-pytest-import-path-and-moto-region-mismatch)
 - [OBS-074 — `terraform destroy` can never fully delete the CloudTrail bucket](#obs-074--terraform-destroy-can-never-fully-delete-the-cloudtrail-bucket)
+- [OBS-075 — kube-state-metrics has zero RBAC, so every alert derived from it silently never fires](#obs-075--kube-state-metrics-has-zero-rbac-so-every-alert-derived-from-it-silently-never-fires)
+- [OBS-076 — doubled `/webhook` path in Alertmanager's receiver URL](#obs-076--doubled-webhook-path-in-alertmanagers-receiver-url)
+- [OBS-077 — Gemini model retirement breaks the RCA Lambda with a 404](#obs-077--gemini-model-retirement-breaks-the-rca-lambda-with-a-404)
+- [OBS-078 — Gemini `thinkingConfig` rejected by Lite model variants, and thought-part narrative corruption](#obs-078--gemini-thinkingconfig-rejected-by-lite-model-variants-and-thought-part-narrative-corruption)
+- [OBS-079 — no idempotency on repeated webhook retries burns LLM quota fast](#obs-079--no-idempotency-on-repeated-webhook-retries-burns-llm-quota-fast)
 
 **TF**
 - [TF-001 — concurrent Helm installs on a single-node cluster](#tf-001--concurrent-helm-installs-on-a-single-node-cluster)
@@ -272,6 +277,46 @@ Two independent, sequential failures hit while getting `lambdas/rca-lambda/tests
 - **If `enable_cloudtrail_object_lock` is turned on** (a real audit-scoped deployment, where the point is that logs can't be deleted), the original problem is back by design, and stays handled defensively: `Makefile`'s `destroy` target runs `terraform destroy -auto-approve`, then unconditionally `terraform state rm aws_s3_bucket.cloudtrail` (idempotent — safe whether or not the destroy actually reached that resource), so the surviving bucket can't block the next `plan`/`apply`. `Makefile`'s `import` target (which `make apply` runs automatically) re-adopts the same bucket on the next cycle. Anyone running `terraform destroy` directly instead of `make destroy` with the lock on needs to run the `state rm` step by hand afterward.
 
 One irreversible side effect from discovering this live: the account's default bucket name, `bookstore-cloudtrail-<account_id>` (no suffix), got a real object locked into it during the very apply/destroy cycle that surfaced this bug, and is now permanently orphaned — nothing can ever delete that specific bucket before 2027-10-22. `terraform/cloudtrail.tf` now names the Terraform-managed bucket `bookstore-cloudtrail-<account_id>-v2` to avoid colliding with it forever. The orphaned original costs pennies/month and needs no action — its own lifecycle rule expires it once its lock clears.
+
+### OBS-075 — kube-state-metrics has zero RBAC, so every alert derived from it silently never fires
+
+**Symptom:** confirmed live 2026-10-01, chaos/RCA validation drill on a second account — deliberately crash-looped a test pod to trigger `PodCrashLooping`, waited well past its `for: 5m` window, and Alertmanager never fired. `docker logs kube-state-metrics` on the monitoring EC2 showed it denied on *every* resource type it tried to list or watch (`nodes`, `secrets`, `leases`, `persistentvolumes`, `storageclasses`, everything) — `User "arn:aws:sts::<account>:assumed-role/bookstore-monitoring-ec2/<instance-id>" cannot list resource "..." at the cluster scope`.
+
+**Root cause:** `terraform/observability-rbac.tf`'s only `ClusterRole`/`ClusterRoleBinding` (`monitoring-kubelet-reader`) grants `nodes/proxy`, `nodes/metrics`, `nodes/stats`, `pods/proxy` — scoped for Prometheus's own direct kubelet/pod-proxy scrape needs, nothing else. kube-state-metrics (a plain Docker container on the monitoring EC2, per `modules/monitoring-ec2`, not deployed via its official Helm chart) needs its own broad list/watch grant across ~20+ resource types, which nobody ever wrote — the chart would normally ship this bundled in, but this project runs it standalone. With zero grants, `kube_pod_container_status_restarts_total` (and every other kube-state-metrics-sourced series) never existed for Prometheus to evaluate, so `PodCrashLooping` and the other kube-state-metrics-derived rules could never fire, no matter how long the underlying condition held.
+
+**Fix:** `terraform/observability-rbac.tf` adds a second `ClusterRole`/`ClusterRoleBinding` pair (`kube-state-metrics`), matching kube-state-metrics' own upstream RBAC requirements, bound to the same `monitoring-metrics-readers` group the EC2's access entry already uses. No restart needed — the next reconcile loop (seconds) picks it up.
+
+### OBS-076 — doubled `/webhook` path in Alertmanager's receiver URL
+
+**Symptom:** confirmed live 2026-10-01, same drill, right after fixing OBS-075 — the alert finally fired, but `docker logs alertmanager` showed every notify attempt failing: `unexpected status code 403: https://<api-id>.execute-api.<region>.amazonaws.com/prod/webhook/webhook: {"message":"Missing Authentication Token"}`. That specific 403 is API Gateway's standard "no route matches this path" response, not an auth problem despite the name.
+
+**Root cause:** `module.aiops_rca`'s `webhook_invoke_url` output (`terraform/modules/aiops-rca/outputs.tf`) already includes the `/webhook` path in its value — its own doc comment says so explicitly ("Full invoke URL (including stage and /webhook path)"). `terraform/modules/monitoring-ec2/user-data.sh.tftpl`'s Alertmanager config template appended `/webhook` a second time (`url: '${rca_webhook_url}/webhook'`), producing `.../prod/webhook/webhook` — a path that doesn't exist on the API Gateway resource, hence the 403.
+
+**Fix:** removed the appended `/webhook` in both `default-webhook` and `critical-webhook` receiver configs — `url: '${rca_webhook_url}'` now matches the real, already-complete URL. A **running** monitoring EC2 baked the old, broken URL into `/opt/monitoring/alertmanager/alertmanager.yml` at boot (user-data only runs once); the terraform fix only takes effect on a fresh instance, so an already-live EC2 needs the file patched by hand (`sed -i 's|/prod/webhook/webhook|/prod/webhook|g' /opt/monitoring/alertmanager/alertmanager.yml && docker restart alertmanager`) to pick it up without a full recreate.
+
+### OBS-077 — Gemini model retirement breaks the RCA Lambda with a 404
+
+**Symptom:** confirmed live 2026-10-01 — the RCA Lambda's Gemini call failed with `HTTP Error 404: Not Found`, body `"This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash..."`. A second, unrelated 404 earlier in the same debugging session (`v1/models/...` instead of `v1beta/models/...`) had the exact same symptom and could be mistaken for the same cause — check the response body, not just the status code, before assuming which one it is.
+
+**Root cause:** not a bug in this codebase — the provider retired a model out from under a previously-working config. This is expected to happen again with any provider over the project's lifetime; it's config drift, not a defect.
+
+**Fix:** not a code change — `LLM_MODEL` in `config.env` is exactly the knob for this (see `docs/DEPLOYMENT.md`'s "Populate the LLM API key" section). Update it to whatever the provider's own error message recommends, re-run `scripts/configure.py` + `terraform apply`. No hand-edited `terraform.tfvars`, ever.
+
+### OBS-078 — Gemini `thinkingConfig` rejected by Lite model variants, and thought-part narrative corruption
+
+**Symptom:** confirmed live 2026-10-01, two related failures while switching between Gemini models in the same session — (1) with a thinking-capable model (`gemini-3.8-flash`), the RCA report's `narrative` field came back as a 54-character garbled fragment (`"...[5m]) * 60 * 5 > 0\` Wait! The metric name is \`kube_pod"`) instead of a real analysis, despite `status: "ok"` and no error; (2) after switching to a "Lite" model variant (`gemini-3.5-flash-lite`) and sending the same request shape, the call failed outright with `HTTP Error 400: Bad Request`, body `"Request contains an invalid argument."`.
+
+**Root cause:** two sides of the same design mistake. `_build_gemini_request` (`lambdas/rca-lambda/lambda_function.py`) unconditionally sent `generationConfig.thinkingConfig: {thinkingBudget: 0}` — a parameter only some Gemini model variants support. (1) is what thinking-capable models do when the request *doesn't* constrain thinking enough and the token budget runs out mid-reasoning: Gemini can return multiple response `parts`, with internal reasoning marked `"thought": true` ahead of the real answer — `_parse_gemini_response` read only `parts[0]`, which was a mid-reasoning fragment, not the final answer. (2) is simpler: "Lite" variants don't support `thinkingConfig` at all, so sending it is itself an invalid argument, independent of (1).
+
+**Fix:** removed `thinkingConfig` from the request entirely — it's model-dependent and not worth chasing per-variant; `_parse_gemini_response` now filters out any part with `"thought": true` and joins what's left, which is the portable fix (correct whether or not a given model ever emits a thought part at all). Covered by `test_parse_gemini_response_skips_thought_parts` and `test_parse_gemini_response_handles_single_plain_part`.
+
+### OBS-079 — no idempotency on repeated webhook retries burns LLM quota fast
+
+**Symptom:** confirmed live 2026-10-01 — fixing OBS-075/076 let one still-firing `PodCrashLooping` alert's notification finally succeed, but by then Alertmanager had already retried the same alert every ~70-90s for about 11 minutes (its own retry-on-failure behavior, separate from `repeat_interval`), and each attempt re-ran the full handler, which internally retried the LLM call up to 3x on any error. One flapping alert generated roughly 30 Gemini calls before succeeding — enough to exhaust a free-tier daily quota (RPD 20) on a single alert.
+
+**Root cause:** two compounding gaps. (1) `handler()` had no concept of "this alert_id was already analyzed" — every duplicate notification re-queried Loki and re-called the LLM from scratch, even though nothing about the incident had changed since the last successful analysis. (2) `call_llm`'s retry loop treated every exception the same way, including `429`/permanent `4xx` errors that retrying can never fix (the same malformed or rate-limited request just fails the same way three times instead of once).
+
+**Fix:** `handler()` now calls `has_ok_report(alert_id)` first — a DynamoDB `Query` on the existing hash key — and returns `{"status": "skipped_duplicate"}` immediately if a successful report already exists for that alert, with no Loki query, no LLM call, and no email. `call_llm` now raises immediately (no retry, no sleep) on any `4xx` or on `503` — only genuine transient failures (timeouts, other `5xx`) still get the short in-invocation retry. Adding the `Query` call surfaced a second small gap: the Lambda's IAM role only ever had `dynamodb:PutItem` (it never needed to read before); `terraform/modules/aiops-rca/iam.tf` now also grants `dynamodb:Query` on the same table resource.
 
 ---
 

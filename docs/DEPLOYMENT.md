@@ -151,19 +151,23 @@ RDS (~10-15 min) and EKS (~15-20 min) are the slow parts and provision concurren
 
 ### Populate the LLM API key (RCA pipeline)
 
-A real API key isn't derivable from anything Terraform has, so it always comes from a human. The RCA Lambda calls Anthropic's Claude API by default; set `llm_provider = "openai"` or `"gemini"` (plus a matching `claude_model` value) in `terraform.tfvars` to use a different provider's key instead — same secret, same steps below, whichever provider you've picked. Two ways to set it — pick one:
+A real API key isn't derivable from anything Terraform has, so it always comes from a human. The RCA Lambda calls Anthropic's Claude API by default. **Switching provider or model — including later, to rotate a key or try a different model — never means hand-editing `terraform.tfvars` or any code.** It's always the same three lines in `config.env`, then the same two commands:
 
 **Preferred: set it in `config.env` before you apply.**
 
 ```bash
 # in config.env:
 LLM_API_KEY=sk-ant-...
+LLM_PROVIDER=anthropic        # or "openai" / "gemini" -- must match the key above
+LLM_MODEL=                    # optional -- blank uses a sensible per-provider default
 
 python3 scripts/configure.py   # regenerates terraform.tfvars with it
 terraform apply                # creates the secret's real value, not just the shell
 ```
 
-To rotate the key later, change `LLM_API_KEY` in `config.env` and re-run both commands — no manual AWS CLI call needed. `config.env` and the `terraform.tfvars` it generates are both gitignored, so the key never touches git; `terraform plan`/`apply` never prints it either (the variable is `sensitive`). It does land in Terraform state, in the same encrypted S3 backend every other secret in this project's state already sits in (DB credentials, JWT secret, Grafana admin) — a deliberate, consistent tradeoff, not a new one.
+To switch provider, rotate a key, or try a different model later: change those same three lines in `config.env` and re-run the same two commands — nothing else. `config.env` and the `terraform.tfvars` it generates are both gitignored, so the key never touches git; `terraform plan`/`apply` never prints it either (the variable is `sensitive`). It does land in Terraform state, in the same encrypted S3 backend every other secret in this project's state already sits in (DB credentials, JWT secret, Grafana admin) — a deliberate, consistent tradeoff, not a new one.
+
+A model name can stop working between one apply and the next — providers retire models. If the RCA Lambda's CloudWatch logs show the LLM call failing with a 404 naming the model, that's not a bug here; update `LLM_MODEL` in `config.env` to whatever the provider's error message recommends and re-run the two commands above.
 
 **Alternative: leave `LLM_API_KEY` blank and populate the secret by hand instead**, once, after apply:
 

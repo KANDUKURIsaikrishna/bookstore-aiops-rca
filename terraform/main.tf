@@ -350,6 +350,8 @@ module "aiops_rca" {
   account_id        = data.aws_caller_identity.current.account_id
 
   llm_api_key                  = var.llm_api_key
+  llm_provider                 = var.llm_provider
+  claude_model                 = var.claude_model
   secrets_recovery_window_days = var.secrets_recovery_window_days
 }
 

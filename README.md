@@ -263,7 +263,7 @@ The GitHub Actions pipeline (`.github/workflows/ci-cd.yml`) runs, per push: secr
 | CI/CD pipeline | GitHub Secrets only | `AWS_ROLE_ARN`, `AWS_ACCOUNT_ID`, `API_URL` — no DB credentials in the pipeline at all |
 | Local development | `.env` file | Never committed; see `.gitignore` |
 | Terraform state | AWS Secrets Manager | RDS admin credentials at `/bookstore/db-credentials`, Grafana admin at `/bookstore/grafana-admin` |
-| RCA Lambda | AWS Secrets Manager (manual population) | LLM API key at `/bookstore/llm-api-key` (Anthropic by default, or OpenAI/Gemini — see `llm_provider`) — Terraform only creates the empty secret shell; a human pastes the real key in (`aws secretsmanager put-secret-value`) since it isn't derivable from anything Terraform has |
+| RCA Lambda | AWS Secrets Manager, config.env-driven | LLM API key at `/bookstore/llm-api-key` (Anthropic by default, or OpenAI/Gemini — set `LLM_API_KEY`/`LLM_PROVIDER`/`LLM_MODEL` in `config.env`, run `scripts/configure.py` + `terraform apply`) — Terraform creates the real secret value, not just an empty shell; manual `aws secretsmanager put-secret-value` is only needed if you leave the key blank in config.env |
 
 **Rule:** No credential, password, or account ID should ever appear in plain text in any committed file.
 

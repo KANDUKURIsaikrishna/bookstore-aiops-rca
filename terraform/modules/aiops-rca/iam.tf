@@ -45,7 +45,7 @@ resource "aws_iam_role_policy" "rca_lambda_inline" {
       },
       {
         Effect   = "Allow"
-        Action   = ["dynamodb:PutItem"]
+        Action   = ["dynamodb:PutItem", "dynamodb:Query"]
         Resource = aws_dynamodb_table.rca_reports.arn
       },
       {

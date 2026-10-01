@@ -1,6 +1,8 @@
+import io
 import json
 import os
 import time
+import urllib.error
 from unittest.mock import patch, MagicMock
 
 import boto3
@@ -89,6 +91,36 @@ def test_handler_calls_claude_and_writes_report_when_logs_exist(dynamodb_table):
     assert items[0]["status"] == "ok"
 
 
+def test_handler_skips_reanalysis_when_alert_already_has_an_ok_report(dynamodb_table):
+    # Alertmanager re-POSTs the same still-firing alert (same fingerprint)
+    # repeatedly until a webhook call succeeds, then again on every
+    # subsequent retry cycle if something downstream keeps failing --
+    # confirmed live: one flapping alert produced ~30 Gemini calls in 11
+    # minutes before the actual bug was fixed, because every retry re-ran
+    # the full Loki-query + LLM-call pipeline from scratch. Once an alert_id
+    # already has a successful ("ok") report, a duplicate notification for
+    # the exact same alert shouldn't re-spend a Loki query + an LLM call --
+    # Alertmanager's own email already tells a human it's still firing.
+    lambda_function.write_report(
+        {"alert_id": "abc123", "service": "order-service", "alertname": "HighErrorRate"},
+        "Root cause: DB timeout in order-service.", [], "ok",
+    )
+
+    with patch("lambda_function.query_loki") as mock_query_loki, \
+         patch("lambda_function.call_llm") as mock_llm, \
+         patch("lambda_function._ses") as mock_ses:
+        result = lambda_function.handler(make_alertmanager_event(), None)
+
+    assert result["statusCode"] == 200
+    assert json.loads(result["body"])["status"] == "skipped_duplicate"
+    mock_query_loki.assert_not_called()
+    mock_llm.assert_not_called()
+    mock_ses.send_email.assert_not_called()
+
+    table = boto3.resource("dynamodb", region_name="us-west-1").Table(os.environ["DYNAMODB_TABLE"])
+    assert len(table.scan()["Items"]) == 1  # the seeded report only -- no duplicate written
+
+
 def test_write_report_sets_ttl_from_retention_window(dynamodb_table):
     before = int(time.time()) + 400 * 86400
     lambda_function.write_report(
@@ -162,6 +194,56 @@ def test_call_llm_raises_after_exhausting_retries():
             lambda_function.call_llm("test prompt", max_retries=2)
 
 
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404, 429, 503])
+def test_call_llm_does_not_retry_on_permanent_or_overload_failures(status_code):
+    # Retrying immediately on 429 (rate limited) or 503 (overloaded) only adds
+    # more requests to an already-throttled key -- confirmed live (2026-10-01
+    # chaos/RCA drill): Alertmanager's own retry-on-failure loop already
+    # re-invokes every ~70-90s on failure, and this handler's blind 3x retry
+    # on top of that turned one flapping alert into ~30 Gemini calls in 11
+    # minutes, burning a free-tier quota outright. Fail fast on these two
+    # codes instead -- let Alertmanager's much slower retry cadence be the
+    # only retry.
+    http_error = urllib.error.HTTPError(
+        "http://example.com", status_code, "err", {}, io.BytesIO(b'{"error": "rate limited"}')
+    )
+    success_response = MagicMock()
+    success_response.__enter__.return_value.read.return_value = json.dumps(
+        {"content": [{"text": "ok"}]}
+    ).encode()
+
+    with patch("lambda_function.get_llm_api_key", return_value="sk-test"), \
+         patch("lambda_function.urllib.request.urlopen") as mock_urlopen, \
+         patch("lambda_function.time.sleep") as mock_sleep:
+        mock_urlopen.side_effect = [http_error, success_response]
+        with pytest.raises(urllib.error.HTTPError):
+            lambda_function.call_llm("test prompt", max_retries=3)
+
+    assert mock_urlopen.call_count == 1
+    mock_sleep.assert_not_called()
+
+
+def test_call_llm_still_retries_on_other_transient_errors():
+    # Genuine transient failures (network blips, non-rate-limit 5xx) should
+    # still get the short in-invocation retry -- only 429/503 skip it.
+    success_response = MagicMock()
+    success_response.__enter__.return_value.read.return_value = json.dumps(
+        {"content": [{"text": "ok"}]}
+    ).encode()
+    http_error = urllib.error.HTTPError(
+        "http://example.com", 500, "err", {}, io.BytesIO(b'{"error": "internal"}')
+    )
+
+    with patch("lambda_function.get_llm_api_key", return_value="sk-test"), \
+         patch("lambda_function.urllib.request.urlopen") as mock_urlopen, \
+         patch("lambda_function.time.sleep"):
+        mock_urlopen.side_effect = [http_error, success_response]
+        result = lambda_function.call_llm("test prompt", max_retries=3)
+
+    assert result == "ok"
+    assert mock_urlopen.call_count == 2
+
+
 def test_call_llm_dispatches_to_anthropic_by_default():
     success_response = MagicMock()
     success_response.__enter__.return_value.read.return_value = json.dumps(
@@ -212,10 +294,38 @@ def test_call_llm_dispatches_to_gemini():
     assert result == "gemini reply"
     sent_request = mock_urlopen.call_args[0][0]
     assert sent_request.full_url == (
-        "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=AIza-test"
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=AIza-test"
     )
     sent_payload = json.loads(sent_request.data)
     assert sent_payload["contents"] == [{"parts": [{"text": "test prompt"}]}]
+    # No thinkingConfig -- some Gemini variants (e.g. "lite" ones) reject it
+    # outright with a 400 INVALID_ARGUMENT. Confirmed live 2026-10-01.
+    assert "thinkingConfig" not in sent_payload["generationConfig"]
+
+
+def test_parse_gemini_response_skips_thought_parts():
+    # Thinking-capable Gemini models can return internal reasoning as a
+    # separate part marked "thought": true, before the real answer part.
+    # Confirmed live (2026-10-01): reading parts[0] alone returned a
+    # 54-character mid-reasoning fragment, not an answer.
+    body = {
+        "candidates": [{
+            "content": {
+                "parts": [
+                    {"thought": True, "text": "Let me think about this..."},
+                    {"text": "Root cause: DB timeout in order-service."},
+                ]
+            }
+        }]
+    }
+    assert lambda_function._parse_gemini_response(body) == "Root cause: DB timeout in order-service."
+
+
+def test_parse_gemini_response_handles_single_plain_part():
+    # Non-thinking models (e.g. "lite" variants) never set "thought" at
+    # all -- the filter must be a no-op for them, not break the common case.
+    body = {"candidates": [{"content": {"parts": [{"text": "plain answer"}]}}]}
+    assert lambda_function._parse_gemini_response(body) == "plain answer"
 
 
 def test_call_llm_raises_on_unsupported_provider():

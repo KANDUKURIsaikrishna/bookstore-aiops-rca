@@ -131,6 +131,23 @@ variable "llm_api_key" {
   sensitive   = true
 }
 
+variable "llm_provider" {
+  description = "Which LLM API the RCA Lambda calls: \"anthropic\" (default), \"openai\", or \"gemini\" -- passed straight through to module.aiops_rca.llm_provider. Set LLM_PROVIDER in config.env and run scripts/configure.py instead of hand-editing terraform.tfvars; it must match whichever provider llm_api_key's key actually belongs to, or every RCA call fails auth."
+  type        = string
+  default     = "anthropic"
+
+  validation {
+    condition     = contains(["anthropic", "openai", "gemini"], var.llm_provider)
+    error_message = "llm_provider must be one of: anthropic, openai, gemini."
+  }
+}
+
+variable "claude_model" {
+  description = "Model ID the RCA Lambda calls, for whichever provider llm_provider selects (the name stayed \"claude_model\" for historical reasons -- it holds any provider's model ID, not just Anthropic's). Set LLM_MODEL in config.env and run scripts/configure.py instead of hand-editing terraform.tfvars."
+  type        = string
+  default     = "claude-haiku-4-5-20251001"
+}
+
 variable "cloudtrail_retention_days" {
   description = "Days CloudTrail logs are locked under S3 Object Lock (COMPLIANCE mode) before the lifecycle rule is allowed to expire them. Only takes effect when enable_cloudtrail_object_lock is true. 400 = 1 year + a 35-day margin, a common SOC 2/ISO 27001 audit-evidence retention baseline. Raise for PCI DSS Req 10.5.1 (1 year online + 3 months immediately available) or a longer regulatory requirement."
   type        = number
