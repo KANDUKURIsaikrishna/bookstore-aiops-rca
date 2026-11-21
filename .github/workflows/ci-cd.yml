@@ -591,9 +591,10 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          # Use the default GITHUB_TOKEN — pushes made with this token do NOT
-          # trigger another workflow run, preventing an infinite loop.
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # DEPLOY_KEY (a write deploy key) is the only non-admin bypass actor
+          # on main's "main-protection" ruleset -- the GitHub Actions bot's
+          # GITHUB_TOKEN push is rejected (the bump has no PR or status checks).
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
           fetch-depth: 0
 
       # Same "env context isn't available inside env:" restriction as the
@@ -640,7 +641,9 @@ jobs:
                   k8s/services/api-gateway/overlays/prod/kustomization.yaml
           # Skips the commit if kustomization.yaml did not actually change
           git diff --staged --quiet && echo "No image tag changes." && exit 0
-          git commit -m "chore: bump image tags to ${TAG}"
+          # [skip ci]: deploy-key pushes DO trigger workflows (GITHUB_TOKEN
+          # pushes did not), so without it every bump would rebuild and re-bump.
+          git commit -m "chore: bump image tags to ${TAG} [skip ci]"
 
           # Retry with rebase: this job's checkout is a snapshot from when the
           # job started, several minutes before this step runs (build+scan
