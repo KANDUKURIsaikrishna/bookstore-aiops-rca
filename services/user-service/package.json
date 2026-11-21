@@ -10,7 +10,7 @@
     "test:coverage": "vitest run --coverage --coverage.reporter=lcov --coverage.reporter=text"
   },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
+    "bcryptjs": "^3.0.3",
     "dotenv": "^16.0.3",
     "express": "^4.18.1",
     "express-rate-limit": "^8.6.2",
