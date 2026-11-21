@@ -10,7 +10,7 @@
     "test:coverage": "vitest run --coverage --coverage.reporter=lcov --coverage.reporter=text"
   },
   "dependencies": {
-    "dotenv": "^16.0.3",
+    "dotenv": "^18.0.10",
     "express": "^4.18.1",
     "helmet": "^8.3.0",
     "morgan": "^1.10.0",
