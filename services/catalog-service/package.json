@@ -19,7 +19,7 @@
     "winston": "^3.19.0"
   },
   "overrides": {
-    "qs": "6.16.0"
+    "qs": "6.16.2"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^2.1.9",
