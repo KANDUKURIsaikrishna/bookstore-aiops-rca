@@ -13,6 +13,11 @@ variable "public_subnet_id" {
   type        = string
 }
 
+variable "private_ip" {
+  description = "Fixed private IP for the monitoring EC2, inside public_subnet_id. Fluent Bit on every EKS node and the RCA Lambda discover Loki's private IP once (node boot / Lambda cold start) and keep it, so a replaced instance with a new IP silently stops log shipping until every node is recycled. Pinning it keeps a replacement transparent."
+  type        = string
+}
+
 variable "eip_allocation_id" {
   description = "Elastic IP allocation ID to associate with the monitoring instance"
   type        = string

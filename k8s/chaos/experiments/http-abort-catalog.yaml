@@ -1,0 +1,28 @@
+# HTTPChaos rewrites responses on the wire, so catalog-service's own
+# http_requests_total still records 200 -- the 503s only show up in
+# api-gateway's metrics. Good test of whether the RCA looks past the service
+# that alerted.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: HTTPChaos
+metadata:
+  name: drill-http-503-catalog
+  namespace: catalog
+  annotations:
+    drill.bookstore.io/fault-service: catalog-service
+    drill.bookstore.io/category: http-errors
+    drill.bookstore.io/root-cause: "catalog-service responses to GET /books replaced with HTTP 503; api-gateway propagates the 5xx"
+    drill.bookstore.io/expected-alerts: "HighErrorRate"
+    drill.bookstore.io/duration: "6m"
+spec:
+  mode: all
+  selector:
+    namespaces: [catalog]
+    labelSelectors:
+      app: catalog-service
+  target: Response
+  port: 3000
+  method: GET
+  path: /books*
+  replace:
+    code: 503
+  duration: "5m"

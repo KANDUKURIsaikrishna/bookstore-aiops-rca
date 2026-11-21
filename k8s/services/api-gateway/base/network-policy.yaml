@@ -34,6 +34,21 @@ spec:
             cidr: 170.20.0.0/16
       ports:
         - port: 3000
+    # Prometheus scrape (OBS-081): the monitoring EC2 scrapes /metrics through
+    # the EKS API-server pod proxy, so connections arrive from the control-plane
+    # ENIs, which live in the 4 EKS cluster subnets. Only the dedicated metrics
+    # port (9464) is opened to them -- the app port stays restricted above.
+    - from:
+        - ipBlock:
+            cidr: 170.20.3.0/24
+        - ipBlock:
+            cidr: 170.20.4.0/24
+        - ipBlock:
+            cidr: 170.20.5.0/24
+        - ipBlock:
+            cidr: 170.20.6.0/24
+      ports:
+        - port: 9464
   # ports below use 3000 (the pods' real containerPort), not 80 (the
   # Service port). NetworkPolicy egress matching is against the actual
   # destination pod port after kube-proxy's Service DNAT, not the Service's

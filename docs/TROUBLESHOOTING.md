@@ -41,6 +41,9 @@ IDs are **not sequential or complete**. Gaps in the numbering (e.g. no OBS-001/0
 - [OBS-078 — Gemini `thinkingConfig` rejected by Lite model variants, and thought-part narrative corruption](#obs-078--gemini-thinkingconfig-rejected-by-lite-model-variants-and-thought-part-narrative-corruption)
 - [OBS-079 — no idempotency on repeated webhook retries burns LLM quota fast](#obs-079--no-idempotency-on-repeated-webhook-retries-burns-llm-quota-fast)
 - [OBS-080 — pod-level alerts on non-bookstore pods always came back "no logs found"](#obs-080--pod-level-alerts-on-non-bookstore-pods-always-came-back-no-logs-found)
+- [OBS-081 — 4 of 5 services' `/metrics` never scraped: NetworkPolicy dropped the API-server proxy](#obs-081--4-of-5-services-metrics-never-scraped-networkpolicy-dropped-the-api-server-proxy)
+- [OBS-082 — chaos (Spot) nodes had no node-exporter or Fluent Bit](#obs-082--chaos-spot-nodes-had-no-node-exporter-or-fluent-bit)
+- [OBS-083 — coarse Alertmanager grouping hid every alert but the first from the RCA](#obs-083--coarse-alertmanager-grouping-hid-every-alert-but-the-first-from-the-rca)
 
 **TF**
 - [TF-001 — concurrent Helm installs on a single-node cluster](#tf-001--concurrent-helm-installs-on-a-single-node-cluster)
@@ -326,6 +329,31 @@ One irreversible side effect from discovering this live: the account's default b
 **Root cause:** `handler()` always built `logs_by_service` by querying Loki for the 5 hardcoded bookstore microservice names (`SERVICES`) and nothing else, regardless of what the firing alert was actually about. `PodCrashLooping`/`HighPodCPUUsage`/`HighPodMemoryUsage` (anything sourced from kube-state-metrics/cAdvisor, grouped `by(namespace, pod)`) carry a `pod` label and **never** a `service` label — they can fire on any pod in the cluster, not just one of the 5 named ones. `parse_alertmanager_payload` had nowhere to put that `pod` label, and `query_loki`'s literal substring match (`|= "<service>"`) never had a reason to search for it, so an alert on any non-bookstore pod (ArgoCD, the AWS Load Balancer Controller, `kube-system`, ...) was structurally guaranteed to find nothing, no matter how informative that pod's own logs were.
 
 **Fix:** `parse_alertmanager_payload` now also extracts `labels.pod` into `alert["pod"]` (empty string when absent — `HighRequestRate`/`HighErrorRate` alerts never have one, and that's fine, their own `service` label already is one of the 5). A new `_log_search_targets(alert)` returns `SERVICES` plus the alert's own `pod` name when present and not already in that list, and `handler()` queries Loki over that combined list instead of the bare `SERVICES` constant. Purely additive — existing alerts that already had a correct `service` label see no behavior change at all.
+
+
+### OBS-081 — 4 of 5 services' `/metrics` never scraped: NetworkPolicy dropped the API-server proxy
+
+**Symptom:** confirmed live 2026-11-21 — `up{job="app-metrics"}` was `0` for catalog-service, user-service, order-service and notification-service, `1` only for api-gateway. Every scrape failed with `context deadline exceeded` against `.../api/v1/namespaces/<ns>/pods/<pod>:3000/proxy/metrics`. So `http_requests_total` existed only for api-gateway, and `HighErrorRate`/`HighRequestRate` could never see a failure inside the other four services.
+
+**Root cause:** the `app-metrics` job (OBS-045) scrapes through the EKS API server's pod proxy. The TCP connection to the pod comes from the **control-plane ENIs** in the cluster subnets (170.20.3.0/24–170.20.6.0/24), not from the monitoring EC2. Each backend's NetworkPolicy only admits port 3000 from the `gateway` (or `order`) namespace, so the proxied scrape was dropped. api-gateway worked only because its policy admits the whole VPC CIDR for the ALB. Opening port 3000 wider was not an option: JWT checks live only in api-gateway, so any pod that can reach catalog-service's port 3000 could write books unauthenticated.
+
+**Fix:** every service now also serves `/metrics` from a separate listener, `createMetricsApp()` on `METRICS_PORT` (default 9464), which serves nothing else (covered by each service's `__tests__/metrics-app.test.js`). The Deployments' `prometheus.io/port` annotation points at 9464, and each NetworkPolicy admits **only 9464** from the 4 cluster-subnet CIDRs. The app port's rules are unchanged. `ServiceTargetDown` now alerts if this regresses. It was firing for exactly these 4 pods when first evaluated.
+
+### OBS-082 — chaos (Spot) nodes had no node-exporter or Fluent Bit
+
+**Symptom:** found in review 2026-11-21, before the chaos node group was ever scaled up. `aws_eks_node_group.chaos` used plain EKS bootstrap with no launch template.
+
+**Root cause:** node-exporter and Fluent Bit are installed by `node-user-data.sh.tftpl` through the app node group's launch template only. The monitoring EC2's node discovery picks up **every** instance tagged `eks:cluster-name`. So a chaos node would have become a node-exporter target with nothing listening, gone `up == 0`, and fired a critical `NodeDown` about 5 minutes after every scale-up. Logs from pods placed on it would also never have reached Loki.
+
+**Fix:** the chaos node group has its own `aws_launch_template.chaos` with the same user-data. It is unpinned, because Spot draws from a separate quota bucket, unlike the app group's pinned template. Node discovery now labels each target with its `nodegroup`. Chaos nodes alert as `ChaosNodeDown`/`ChaosNodeNotReady` at **warning**, since Spot reclaims and node-loss drills are expected there. App nodes keep `NodeDown`/`KubeNodeNotReady` at critical. kube-state-metrics exposes the node `role` label (`--metric-labels-allowlist=nodes=[role]`) for the NotReady split.
+
+### OBS-083 — coarse Alertmanager grouping hid every alert but the first from the RCA
+
+**Symptom:** found in review 2026-11-21. `route.group_by` was `[alertname, severity, cluster]`, so a `HighErrorRate` on catalog-service and one on order-service would arrive in **one** webhook notification.
+
+**Root cause:** `parse_alertmanager_payload` analyzes `alerts[0]` only. Every other alert in the same group never got an RCA report. `HighErrorRate` also had no `by(service)` at all, so it couldn't say which service was failing.
+
+**Fix:** `group_by` now includes `service`, `namespace`, `pod`, `node` and `instance`, so each affected thing gets its own notification and its own RCA. `HighErrorRate` is per service, with a traffic floor so a single failed request at idle doesn't page. Pod- and deployment-level alerts gain a `service` label via `label_replace` when they belong to a bookstore service. Inhibit rules suppress symptoms of an already-alerting root: `DeploymentDown` over its unavailable/NotReady pods, crash-loop/OOM over `PodNotReady`, node loss over `KubeNodeCountDecreased`. The full catalogue is in [`ALERTS.md`](ALERTS.md).
 
 ---
 

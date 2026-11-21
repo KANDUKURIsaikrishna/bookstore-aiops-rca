@@ -200,3 +200,9 @@ variable "chaos_node_desired_size" {
   type        = number
   default     = 0
 }
+
+variable "enable_chaos_mesh" {
+  description = "Install Chaos Mesh for fault-injection drills (see k8s/chaos/ and scripts/chaos_drill.py). Off by default. Usually turned on together with enable_chaos_node_group."
+  type        = bool
+  default     = false
+}

@@ -229,9 +229,14 @@ resource "aws_key_pair" "monitoring" {
 # ── EC2 Instance ───────────────────────────────────────────────────────────────
 
 resource "aws_instance" "monitoring" { # nosemgrep: aws-ec2-has-public-ip
-  ami                         = data.aws_ami.ubuntu.id
-  instance_type               = var.instance_type
-  subnet_id                   = var.public_subnet_id
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type
+  subnet_id     = var.public_subnet_id
+  # Fixed, so replacing this instance (any user-data change does, see
+  # user_data_replace_on_change) never moves Loki out from under Fluent Bit
+  # on already-running nodes. The old instance is destroyed before the new
+  # one is created (no create_before_destroy), which frees the address.
+  private_ip                  = var.private_ip
   vpc_security_group_ids      = [aws_security_group.monitoring.id]
   iam_instance_profile        = aws_iam_instance_profile.monitoring.name
   key_name                    = aws_key_pair.monitoring.key_name

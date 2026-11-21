@@ -2,6 +2,10 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: catalog
+  # Opt-in for Chaos Mesh (controllerManager.enableFilterNamespace) -- inert
+  # unless Chaos Mesh is installed (var.enable_chaos_mesh). See k8s/chaos/.
+  annotations:
+    chaos-mesh.org/inject: enabled
   labels:
     name: catalog
     pod-security.kubernetes.io/enforce: restricted

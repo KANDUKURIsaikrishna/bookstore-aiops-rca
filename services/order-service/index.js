@@ -1,6 +1,6 @@
 import mysql from "mysql2";
 import dotenv from "dotenv";
-import { createApp, logger } from "./app.js";
+import { createApp, createMetricsApp, logger } from "./app.js";
 
 dotenv.config();
 
@@ -35,4 +35,9 @@ const app = createApp(db, notifyFn);
 const APP_PORT = process.env.APP_PORT || 3000;
 app.listen(APP_PORT, () => {
   logger.info("startup", { message: `order-service listening on port ${APP_PORT}.` });
+});
+
+const METRICS_PORT = process.env.METRICS_PORT || 9464;
+createMetricsApp().listen(METRICS_PORT, () => {
+  logger.info("startup", { message: `order-service metrics listening on port ${METRICS_PORT}.` });
 });

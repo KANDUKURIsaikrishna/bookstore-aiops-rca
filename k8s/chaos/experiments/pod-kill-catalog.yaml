@@ -1,0 +1,18 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: drill-pod-kill-catalog
+  namespace: catalog
+  annotations:
+    drill.bookstore.io/fault-service: catalog-service
+    drill.bookstore.io/category: pod-loss
+    drill.bookstore.io/root-cause: "catalog-service pod killed (single replica); requests 502 at api-gateway until the replacement is Ready"
+    drill.bookstore.io/expected-alerts: "DeploymentReplicasUnavailable,HighErrorRate"
+    drill.bookstore.io/duration: "3m"
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces: [catalog]
+    labelSelectors:
+      app: catalog-service

@@ -1,0 +1,21 @@
+# Negative control: api-gateway runs 2 replicas behind a PDB, so losing one
+# should produce no customer-facing incident. A good RCA reports "no
+# meaningful impact" instead of inventing a root cause.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: drill-pod-kill-gateway-control
+  namespace: gateway
+  annotations:
+    drill.bookstore.io/fault-service: api-gateway
+    drill.bookstore.io/category: control-no-impact
+    drill.bookstore.io/root-cause: "one of two api-gateway replicas killed; the other keeps serving, no user impact expected"
+    drill.bookstore.io/expected-alerts: "none expected (DeploymentReplicasUnavailable at most, briefly)"
+    drill.bookstore.io/duration: "3m"
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces: [gateway]
+    labelSelectors:
+      app: api-gateway

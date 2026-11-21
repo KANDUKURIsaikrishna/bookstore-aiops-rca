@@ -195,10 +195,51 @@ resource "aws_eks_node_group" "this" {
 # higher) means there's no safe on-demand headroom to grow into here.
 # capacity_type = "SPOT" draws from a separate EC2 quota bucket ("All
 # Standard ... Spot Instance Requests") than that on-demand 8, so this node
-# group can exist without eating into it at all. No launch_template
-# override -- plain EKS bootstrap is enough for throwaway chaos-test
-# capacity, no need for the Fluent Bit/Loki node-user-data this project's
-# app nodes carry.
+# group can exist without eating into it at all.
+#
+# Own launch template carrying the same node-user-data as the app nodes
+# (node-exporter + Fluent Bit). Without it, chaos nodes still got picked up
+# by the monitoring EC2's node discovery (every instance tagged
+# eks:cluster-name), sat at up==0 with nothing on :9100, and fired a false
+# NodeDown ~5m after every scale-up -- and logs from pods placed on them
+# never reached Loki, so drills run there had no evidence for the RCA.
+# Separate from aws_launch_template.nodes so the app node group's pinned
+# version (see its ignore_changes) is untouched.
+resource "aws_launch_template" "chaos" {
+  count       = var.enable_chaos_node_group ? 1 : 0
+  name_prefix = "${var.prefix}-chaos-node-"
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+    ebs {
+      volume_type           = "gp3"
+      volume_size           = 20
+      encrypted             = true
+      delete_on_termination = true
+    }
+  }
+
+  user_data = base64encode(templatefile("${path.module}/node-user-data.sh.tftpl", {
+    cluster_name = var.cluster_name
+    region       = var.region
+  }))
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags          = { Name = "${var.prefix}-eks-chaos-node" }
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 resource "aws_eks_node_group" "chaos" {
   count = var.enable_chaos_node_group ? 1 : 0
 
@@ -210,6 +251,14 @@ resource "aws_eks_node_group" "chaos" {
   instance_types = var.chaos_node_instance_types
   capacity_type  = "SPOT"
   ami_type       = "AL2_x86_64"
+
+  # Not pinned like the app node group: Spot capacity draws from its own
+  # quota bucket, so a rolling replace here never hits the on-demand vCPU
+  # ceiling that forced that pin.
+  launch_template {
+    id      = aws_launch_template.chaos[0].id
+    version = aws_launch_template.chaos[0].latest_version
+  }
 
   scaling_config {
     min_size     = 0

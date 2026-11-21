@@ -1,0 +1,22 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: drill-network-loss-catalog
+  namespace: catalog
+  annotations:
+    drill.bookstore.io/fault-service: catalog-service
+    drill.bookstore.io/category: packet-loss
+    drill.bookstore.io/root-cause: "40% packet loss on catalog-service pod network; retransmits cause slow and failed /books requests"
+    drill.bookstore.io/expected-alerts: "HighLatencyP95,HighErrorRate"
+    drill.bookstore.io/duration: "7m"
+spec:
+  action: loss
+  mode: all
+  selector:
+    namespaces: [catalog]
+    labelSelectors:
+      app: catalog-service
+  loss:
+    loss: "40"
+    correlation: "25"
+  duration: "6m"

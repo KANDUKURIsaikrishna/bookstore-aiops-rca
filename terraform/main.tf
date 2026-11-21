@@ -301,9 +301,12 @@ resource "aws_eip" "monitoring" {
 module "monitoring_ec2" {
   source = "./modules/monitoring-ec2"
 
-  vpc_id                    = module.network.vpc_id
-  vpc_cidr                  = local.vpc_cidr
-  public_subnet_id          = module.network.public_subnet_ids[0]
+  vpc_id           = module.network.vpc_id
+  vpc_cidr         = local.vpc_cidr
+  public_subnet_id = module.network.public_subnet_ids[0]
+  # .123 is the address the instance already holds -- pinning the current
+  # value means no change on the live box, only on future replacements.
+  private_ip                = cidrhost(local.public_subnets[0].cidr, 123)
   eip_allocation_id         = aws_eip.monitoring.id
   cluster_name              = module.eks.cluster_name
   region                    = var.aws_region
@@ -384,6 +387,7 @@ module "eks_addons" {
   node_role_name    = module.eks.node_role_name
 
   secrets_recovery_window_days = var.secrets_recovery_window_days
+  enable_chaos_mesh            = var.enable_chaos_mesh
 
   # module.network explicitly, not just module.eks: nothing in eks_addons
   # references the NAT gateway's ID directly (EKS/node group reference
