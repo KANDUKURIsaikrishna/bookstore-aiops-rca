@@ -1,0 +1,54 @@
+# Node-level CPU saturation on a chaos node (not an app node), so
+# HighCPUUsage can be drilled without starving the bookstore. Needs the chaos
+# node group scaled to >= 1 (chaos_drill.py checks first).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drill-cpu-burner
+  namespace: chaos-testing
+  annotations:
+    drill.bookstore.io/fault-service: node
+    drill.bookstore.io/category: node-cpu-saturation
+    drill.bookstore.io/root-cause: "CPU-burning workload saturating a chaos node (2 busy-loop pods, ~2 vCPU on a t3.medium)"
+    drill.bookstore.io/expected-alerts: "HighCPUUsage"
+    drill.bookstore.io/duration: "14m"
+    drill.bookstore.io/requires: "chaos-node"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: drill-cpu-burner
+  template:
+    metadata:
+      labels:
+        app: drill-cpu-burner
+    spec:
+      nodeSelector:
+        role: chaos
+      tolerations:
+        - key: chaos
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: burn
+          image: public.ecr.aws/docker/library/busybox:1.36
+          command: ["sh", "-c", "while :; do :; done"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "900m"
+              memory: "16Mi"
+            limits:
+              cpu: "1"
+              memory: "32Mi"

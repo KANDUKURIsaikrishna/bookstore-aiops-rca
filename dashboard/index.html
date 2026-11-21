@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Bookstore RCA Reports</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <h1>RCA Reports</h1>
+  <div id="report-list">Loading...</div>
+  <div id="report-detail" hidden>
+    <button id="back-button">&larr; Back to list</button>
+    <h2 id="detail-title"></h2>
+    <pre id="detail-narrative"></pre>
+  </div>
+  <script>
+    window.READ_API_URL = "${READ_API_URL}";
+  </script>
+  <script src="script.js"></script>
+</body>
+</html>

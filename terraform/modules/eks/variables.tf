@@ -81,3 +81,37 @@ variable "admin_principal_arns" {
   type        = list(string)
   default     = []
 }
+
+variable "enable_chaos_node_group" {
+  description = "Creates a second, Spot-backed EKS managed node group dedicated to chaos-engineering test runs (e.g. Chaos Mesh's chaos-daemon + deliberately-targeted pods), kept separate from the primary on-demand node group (aws_eks_node_group.this) so fault injection never competes with it for capacity or quota. Off by default. Spot draws from a separate EC2 quota bucket (\"All Standard ... Spot Instance Requests\") than the on-demand quota the primary node group uses -- deliberately treated as a hard 8 regardless of the account's current live value, so this node group is designed to need zero on-demand headroom rather than assume any is spare."
+  type        = bool
+  default     = false
+}
+
+variable "chaos_node_instance_types" {
+  description = "Instance types for the chaos node group, only used when enable_chaos_node_group is true. Multiple types given for Spot capacity diversity (AWS best practice — a single-type Spot request has a smaller capacity pool to draw from)."
+  type        = list(string)
+  default     = ["t3.medium", "t3a.medium"]
+}
+
+variable "chaos_node_max_size" {
+  description = "Max nodes in the chaos node group, only used when enable_chaos_node_group is true."
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.chaos_node_max_size >= 1
+    error_message = "chaos_node_max_size must be 1 or greater."
+  }
+}
+
+variable "chaos_node_desired_size" {
+  description = "Desired nodes in the chaos node group at rest, only used when enable_chaos_node_group is true. Default 0 -- no instances, no cost, until a test window bumps this (targeted apply, or `aws eks update-nodegroup-config`) and drops it back to 0 afterward. No full destroy/recreate cycle needed to make it ephemeral -- min_size=0 makes 0 a valid steady state."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.chaos_node_desired_size >= 0
+    error_message = "chaos_node_desired_size must be 0 or greater."
+  }
+}

@@ -1,0 +1,27 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: drill-partition-order-notification
+  namespace: order
+  annotations:
+    drill.bookstore.io/fault-service: notification-service
+    drill.bookstore.io/category: network-partition
+    drill.bookstore.io/root-cause: "network partition order-service -> notification-service; order dispatch to /notify times out (orders still commit)"
+    drill.bookstore.io/expected-alerts: "NotificationDispatchFailures"
+    drill.bookstore.io/duration: "6m"
+    drill.bookstore.io/needs-traffic: "POST /orders"
+spec:
+  action: partition
+  mode: all
+  selector:
+    namespaces: [order]
+    labelSelectors:
+      app: order-service
+  direction: to
+  target:
+    mode: all
+    selector:
+      namespaces: [notification]
+      labelSelectors:
+        app: notification-service
+  duration: "5m"

@@ -170,24 +170,29 @@ CLUSTER_NAME="${cluster_name}"
 NE_PORT="${ne_port}"
 KUBELET_PORT="${kubelet_port}"
 
-NODE_IPS=$(aws ec2 describe-instances \
+# "<ip> <nodegroup>" per line. nodegroup lets the chaos (Spot) node group
+# alert at warning instead of critical (ChaosNodeDown vs NodeDown).
+NODES=$(aws ec2 describe-instances \
   --region "$REGION" \
   --filters \
     "Name=tag:eks:cluster-name,Values=$CLUSTER_NAME" \
     "Name=instance-state-name,Values=running" \
-  --query 'Reservations[*].Instances[*].PrivateIpAddress' \
-  --output text | tr '\t\n' ' ' | xargs)
+  --query 'Reservations[*].Instances[*].[PrivateIpAddress, Tags[?Key==`eks:nodegroup-name`]|[0].Value]' \
+  --output text)
 
 build_json() {
   local port=$1
-  local first=true
   printf '['
-  for ip in $NODE_IPS; do
-    [ "$first" = "false" ] && printf ','
-    printf '{"targets":["%s:%s"],"labels":{"cluster":"%s"}}' \
-      "$ip" "$port" "$CLUSTER_NAME"
-    first=false
-  done
+  echo "$NODES" | {
+    first=true
+    while read -r ip ng; do
+      [ -z "$ip" ] && continue
+      [ "$first" = "false" ] && printf ','
+      printf '{"targets":["%s:%s"],"labels":{"cluster":"%s","nodegroup":"%s"}}' \
+        "$ip" "$port" "$CLUSTER_NAME" "$ng"
+      first=false
+    done
+  }
   printf ']'
 }
 
@@ -249,6 +254,19 @@ scrape_configs:
   - job_name: 'kube-state-metrics'
     static_configs:
       - targets: ['kube-state-metrics:8080']
+
+  # Self-monitoring: AlertmanagerNotificationsFailing (a broken RCA webhook,
+  # like OBS-076, now alerts by email) and LogIngestionStalled.
+  - job_name: 'alertmanager'
+    basic_auth:
+      username: admin
+      password_file: /etc/prometheus/basic-auth-password
+    static_configs:
+      - targets: ['alertmanager:9093']
+
+  - job_name: 'loki'
+    static_configs:
+      - targets: ['loki:3100']
 
   - job_name: 'node-exporter'
     file_sd_configs:
@@ -313,92 +331,214 @@ WEB_EOF
 
 # ── Prometheus alerting rules ─────────────────────────────────────────────────
 cat > /opt/monitoring/prometheus/rules/bookstore.yml << 'RULES_EOF'
+# Full rule rationale: docs/ALERTS.md. Every pod/deployment alert gets a
+# `service` label via label_replace when the pod belongs to a bookstore
+# service, so the RCA can always find the right logs.
 groups:
-  - name: bookstore
+  - name: bookstore-nodes
     rules:
       - alert: NodeDown
-        expr: up{job="node-exporter"} == 0
-        for: 5m
-        labels:
-          severity: critical
+        expr: up{job="node-exporter", nodegroup!~".*chaos.*"} == 0
+        for: 3m
+        labels: {severity: critical}
         annotations:
-          summary: "EKS node {{ $labels.instance }} unreachable"
-
+          summary: "EKS node {{ $labels.instance }} ({{ $labels.nodegroup }}) unreachable"
+      - alert: ChaosNodeDown
+        expr: up{job="node-exporter", nodegroup=~".*chaos.*"} == 0
+        for: 3m
+        labels: {severity: warning}
+        annotations:
+          summary: "Spot chaos node {{ $labels.instance }} unreachable (drill or Spot reclaim)"
+      - alert: KubeNodeNotReady
+        expr: (kube_node_status_condition{condition="Ready",status="true"} == 0) unless on(node) kube_node_labels{label_role="chaos"}
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Node {{ $labels.node }} NotReady"
+      - alert: ChaosNodeNotReady
+        expr: (kube_node_status_condition{condition="Ready",status="true"} == 0) and on(node) kube_node_labels{label_role="chaos"}
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Chaos node {{ $labels.node }} NotReady"
+      - alert: KubeNodeCountDecreased
+        expr: count(kube_node_info) < max_over_time(count(kube_node_info)[15m:1m])
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Cluster lost a node: {{ $value }} nodes now (fewer than 15m ago)"
+      - alert: KubeNodePressure
+        expr: kube_node_status_condition{condition=~"MemoryPressure|DiskPressure|PIDPressure",status="true"} == 1
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Node {{ $labels.node }} under {{ $labels.condition }}"
       - alert: HighCPUUsage
-        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        expr: 100 - (avg by(instance, nodegroup) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
         for: 10m
-        labels:
-          severity: warning
+        labels: {severity: warning}
         annotations:
-          summary: "CPU > 80% on {{ $labels.instance }}: {{ $value | printf \"%.1f\" }}%"
-
+          summary: "Node CPU {{ $value | printf \"%.1f\" }}% on {{ $labels.instance }} ({{ $labels.nodegroup }})"
       - alert: HighMemoryUsage
         expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 85
         for: 10m
-        labels:
-          severity: warning
+        labels: {severity: warning}
         annotations:
-          summary: "Memory > 85% on {{ $labels.instance }}: {{ $value | printf \"%.1f\" }}%"
+          summary: "Node memory {{ $value | printf \"%.1f\" }}% on {{ $labels.instance }} ({{ $labels.nodegroup }})"
+      - alert: NodeDiskSpaceLow
+        expr: node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} < 0.15
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Root disk {{ $value | humanizePercentage }} free on {{ $labels.instance }}"
+      - alert: NodePodCapacityHigh
+        expr: count by(node) (kube_pod_info{node!=""} * on(namespace, pod) group_left() (kube_pod_status_phase{phase="Running"} == 1)) / on(node) kube_node_status_allocatable{resource="pods"} > 0.9
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Node {{ $labels.node }} at {{ $value | humanizePercentage }} of its pod limit (t3.medium = 17)"
 
+  - name: bookstore-workloads
+    rules:
       - alert: PodCrashLooping
-        expr: rate(kube_pod_container_status_restarts_total[15m]) * 60 * 15 > 3
-        for: 5m
-        labels:
-          severity: warning
+        expr: label_replace(increase(kube_pod_container_status_restarts_total[15m]) > 3, "service", "$1", "pod", "(api-gateway|catalog-service|user-service|order-service|notification-service)-.*")
+        for: 1m
+        labels: {severity: warning}
         annotations:
-          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} crash-looping"
+          summary: "{{ $labels.namespace }}/{{ $labels.pod }} restarted {{ $value | printf \"%.0f\" }}x in 15m"
+      - alert: ContainerWaiting
+        expr: label_replace(max by(namespace, pod, container, reason) (kube_pod_container_status_waiting_reason{reason=~"CrashLoopBackOff|ImagePullBackOff|ErrImagePull|CreateContainerConfigError|CreateContainerError|InvalidImageName"}) == 1, "service", "$1", "pod", "(api-gateway|catalog-service|user-service|order-service|notification-service)-.*")
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.pod }} stuck in {{ $labels.reason }}"
+      - alert: ContainerOOMKilled
+        expr: label_replace((kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1) and on(namespace, pod, container) (increase(kube_pod_container_status_restarts_total[10m]) > 0), "service", "$1", "pod", "(api-gateway|catalog-service|user-service|order-service|notification-service)-.*")
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.pod }} container {{ $labels.container }} OOMKilled"
+      - alert: PodNotReady
+        expr: label_replace((max by(namespace, pod) (kube_pod_status_ready{condition="false"}) == 1) and on(namespace, pod) (max by(namespace, pod) (kube_pod_status_phase{phase=~"Running|Pending"}) == 1), "service", "$1", "pod", "(api-gateway|catalog-service|user-service|order-service|notification-service)-.*")
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.pod }} not Ready for 5m"
+      - alert: DeploymentReplicasUnavailable
+        expr: label_replace(kube_deployment_status_replicas_unavailable > 0, "service", "$1", "deployment", "(api-gateway|catalog-service|user-service|order-service|notification-service)")
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.deployment }}: {{ $value }} replica(s) unavailable"
+      - alert: DeploymentDown
+        expr: label_replace((kube_deployment_status_replicas_available == 0) and (kube_deployment_spec_replicas > 0), "service", "$1", "deployment", "(api-gateway|catalog-service|user-service|order-service|notification-service)")
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.deployment }} has zero available replicas"
+      - alert: HPAMaxedOut
+        expr: kube_horizontalpodautoscaler_status_current_replicas >= kube_horizontalpodautoscaler_spec_max_replicas
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} pinned at max replicas"
+      - alert: KubeJobFailed
+        expr: kube_job_status_failed > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Job {{ $labels.namespace }}/{{ $labels.job_name }} failed"
+      # Demo alert driven by scripts/simulate_load.py (absolute cores, short
+      # window). Control-plane namespaces excluded -- ArgoCD's controller
+      # tripped it on its own (OBS-080).
+      - alert: HighPodCPUUsage
+        expr: sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{container!="", container!="POD", namespace!~"kube-system|argocd|chaos-mesh"}[1m])) > 0.3
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.pod }} using {{ $value | printf \"%.2f\" }} cores"
+      - alert: PodCPUNearLimit
+        expr: label_replace(sum by(namespace, pod, container) (rate(container_cpu_usage_seconds_total{container!="", container!="POD"}[2m])) / sum by(namespace, pod, container) (kube_pod_container_resource_limits{resource="cpu"}) > 0.9, "service", "$1", "pod", "(api-gateway|catalog-service|user-service|order-service|notification-service)-.*")
+        for: 3m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.pod }} at {{ $value | humanizePercentage }} of CPU limit"
+      - alert: CPUThrottlingHigh
+        expr: label_replace(sum by(namespace, pod, container) (rate(container_cpu_cfs_throttled_periods_total{container!=""}[5m])) / sum by(namespace, pod, container) (rate(container_cpu_cfs_periods_total{container!=""}[5m])) > 0.5, "service", "$1", "pod", "(api-gateway|catalog-service|user-service|order-service|notification-service)-.*")
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.pod }} throttled {{ $value | humanizePercentage }} of CFS periods"
+      - alert: PodMemoryNearLimit
+        expr: label_replace(sum by(namespace, pod, container) (container_memory_working_set_bytes{container!="", container!="POD"}) / sum by(namespace, pod, container) (kube_pod_container_resource_limits{resource="memory"}) > 0.9, "service", "$1", "pod", "(api-gateway|catalog-service|user-service|order-service|notification-service)-.*")
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.pod }} at {{ $value | humanizePercentage }} of memory limit"
 
+  - name: bookstore-services
+    rules:
+      - alert: HighErrorRate
+        expr: (sum by(service) (rate(http_requests_total{job="app-metrics", status=~"5.."}[2m])) / sum by(service) (rate(http_requests_total{job="app-metrics"}[2m])) > 0.05) and sum by(service) (rate(http_requests_total{job="app-metrics"}[2m])) > 0.05
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.service }} 5xx ratio {{ $value | humanizePercentage }}"
+      - alert: HighLatencyP95
+        expr: (histogram_quantile(0.95, sum by(service, le) (rate(http_request_duration_seconds_bucket{job="app-metrics", route!~"/health|/metrics"}[5m]))) > 1) and sum by(service) (rate(http_request_duration_seconds_count{job="app-metrics", route!~"/health|/metrics"}[5m])) > 0.05
+        for: 3m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.service }} p95 latency {{ $value | printf \"%.2f\" }}s"
+      - alert: HighRequestRate
+        expr: sum by (service) (rate(http_requests_total{job="app-metrics", route!~"/health|/metrics"}[1m])) > 3
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.service }} request rate {{ $value | printf \"%.1f\" }} req/s"
+      - alert: ServiceTargetDown
+        expr: label_replace(up{job="app-metrics", namespace=~"gateway|catalog|user|order|notification"} == 0, "service", "$1", "app", "(.+)")
+        for: 3m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.service }} pod {{ $labels.pod }} not answering /metrics"
+      - alert: NotificationDispatchFailures
+        expr: increase(notification_dispatch_failures_total[5m]) > 0
+        labels: {severity: warning, dependency: notification-service}
+        annotations:
+          summary: "order-service failed {{ $value | printf \"%.0f\" }} notification dispatch(es) in 5m"
+      - alert: EventLoopLagHigh
+        expr: nodejs_eventloop_lag_p99_seconds{job="app-metrics"} > 0.5
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.service }} event loop p99 lag {{ $value | printf \"%.2f\" }}s"
+
+  - name: bookstore-monitoring
+    rules:
       - alert: KubeStateMetricsDown
         expr: up{job="kube-state-metrics"} == 0
         for: 5m
-        labels:
-          severity: critical
+        labels: {severity: critical}
         annotations:
-          summary: "kube-state-metrics is unreachable — no Kubernetes metrics"
-
-      # Real per-pod usage (kubelet cAdvisor, see OBS-044) -- catches a
-      # single runaway pod, not just whole-node pressure like HighCPUUsage
-      # above. These three (HighPodCPUUsage / HighRequestRate / HighErrorRate)
-      # are the demo alerts scripts/simulate_load.py drives: 1m rate windows
-      # and short `for:` holds (vs. 5-10m on the real node-level alerts), so
-      # with the 10s scrape_interval above a load test trips them ~90-120s
-      # after load start, and the email lands ~10s later.
-      - alert: HighPodCPUUsage
-        expr: sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{container!="", container!="POD"}[1m])) > 0.3
-        for: 20s
-        labels:
-          severity: warning
+          summary: "kube-state-metrics unreachable -- every Kubernetes-state alert is blind"
+      - alert: ScrapeTargetDown
+        expr: up{job=~"kubelet-cadvisor|alertmanager|loki"} == 0
+        for: 10m
+        labels: {severity: warning}
         annotations:
-          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} CPU usage {{ $value | printf \"%.2f\" }} cores"
-
-      - alert: HighPodMemoryUsage
-        expr: sum by (namespace, pod) (container_memory_working_set_bytes{container!="", container!="POD"}) > 200 * 1024 * 1024
-        for: 1m
-        labels:
-          severity: warning
+          summary: "{{ $labels.job }} target {{ $labels.instance }} down"
+      - alert: AlertmanagerNotificationsFailing
+        expr: sum by(integration) (rate(alertmanager_notifications_failed_total[5m])) > 0
+        for: 5m
+        labels: {severity: warning}
         annotations:
-          summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} memory usage {{ $value | humanize1024 }}B"
-
-      # Traffic, from each service's own prom-client http_requests_total
-      # counter (see OBS-045 for how this gets scraped). Threshold is low
-      # on purpose -- this app has near-zero idle traffic, so a modest load
-      # test trips it fast without risking a false-positive at rest.
-      - alert: HighRequestRate
-        expr: sum by (service) (rate(http_requests_total[1m])) > 3
-        for: 20s
-        labels:
-          severity: warning
+          summary: "Alertmanager {{ $labels.integration }} notifications failing (RCA webhook or email)"
+      - alert: LogIngestionStalled
+        expr: sum(rate(loki_distributor_lines_received_total[10m])) == 0
+        for: 10m
+        labels: {severity: warning}
         annotations:
-          summary: "{{ $labels.service }} request rate {{ $value | printf \"%.1f\" }} req/s"
-
-      - alert: HighErrorRate
-        expr: |
-          sum(rate(http_requests_total{status=~"5.."}[1m])) / sum(rate(http_requests_total[1m])) > 0.05
-        for: 30s
-        labels:
-          severity: critical
-        annotations:
-          summary: "5xx error rate {{ $value | humanizePercentage }} across app-metrics"
+          summary: "Loki received no log lines for 10m -- Fluent Bit pipeline broken"
 RULES_EOF
 
 # ── Alertmanager config ───────────────────────────────────────────────────────
@@ -419,7 +559,10 @@ global:
 
 route:
   receiver: 'default-webhook'
-  group_by: ['alertname', 'severity', 'cluster']
+  # One notification per affected service/pod/node, not one per alertname:
+  # the RCA Lambda analyzes alerts[0] of each notification, so a coarse
+  # group_by silently dropped every other service's alert from analysis.
+  group_by: ['alertname', 'severity', 'service', 'namespace', 'pod', 'node', 'instance']
   # 10s (default is 30s) -- first notification for a new alert group goes out
   # almost as soon as Prometheus fires it, so the demo email isn't held back
   # half a minute after the alert already shows in the UI.
@@ -447,7 +590,7 @@ receivers:
     #     text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ "\n" }}{{ end }}'
     #     send_resolved: true
     webhook_configs:
-      - url: 'http://localhost:5001/'
+      - url: '${rca_webhook_url}'
         send_resolved: true
     email_configs:
       - to: '$SMTP_TO'
@@ -457,7 +600,7 @@ receivers:
 
   - name: 'critical-webhook'
     webhook_configs:
-      - url: 'http://localhost:5001/'
+      - url: '${rca_webhook_url}'
         send_resolved: true
     email_configs:
       - to: '$SMTP_TO'
@@ -471,6 +614,22 @@ inhibit_rules:
     target_matchers:
       - severity = "warning"
     equal: ['alertname', 'instance']
+  # A whole Deployment being down explains its unavailable replicas and
+  # NotReady pods -- send the root alert, not three.
+  - source_matchers:
+      - alertname = "DeploymentDown"
+    target_matchers:
+      - alertname =~ "DeploymentReplicasUnavailable|PodNotReady|ServiceTargetDown"
+    equal: ['namespace']
+  - source_matchers:
+      - alertname =~ "ContainerWaiting|PodCrashLooping|ContainerOOMKilled"
+    target_matchers:
+      - alertname = "PodNotReady"
+    equal: ['namespace', 'pod']
+  - source_matchers:
+      - alertname =~ "NodeDown|KubeNodeNotReady|ChaosNodeDown|ChaosNodeNotReady"
+    target_matchers:
+      - alertname = "KubeNodeCountDecreased"
 AM_EOF
 
 # ── Alertmanager web auth (OBS-063) ───────────────────────────────────────────
@@ -508,7 +667,72 @@ schema_config:
         period: 24h
 limits_config:
   allow_structured_metadata: false
+  retention_period: 336h
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+# Log-based alerts (rules below). Same Alertmanager, same basic auth as
+# Prometheus; the password comes from the environment (-config.expand-env)
+# so it never lands in this file.
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /etc/loki/rules
+  rule_path: /loki/rules-temp
+  alertmanager_url: http://alertmanager:9093
+  enable_alertmanager_v2: true
+  alertmanager_client:
+    basic_auth_username: admin
+    basic_auth_password: $${LOKI_ALERTMANAGER_PASSWORD}
+  enable_api: true
 LOKI_EOF
+
+# ── Loki alert rules (log-based) ──────────────────────────────────────────────
+# Loki has no service labels (Fluent Bit runs on the host, no k8s
+# enrichment), so each rule pulls namespace/service out of the Fluent Bit
+# `filename` field: .../<pod>_<namespace>_<container>-<64-hex id>.log.
+# auth_enabled=false -> tenant "fake".
+mkdir -p /opt/monitoring/loki/rules/fake
+cat > /opt/monitoring/loki/rules/fake/bookstore.yml << 'LOKI_RULES_EOF'
+groups:
+  - name: bookstore-logs
+    interval: 1m
+    rules:
+      - alert: DBErrorsInLogs
+        expr: |
+          sum by (namespace, service) (count_over_time({job="eks-containers"}
+            |~ `db_error|ER_[A-Z_]{3,}|PROTOCOL_CONNECTION_LOST|Too many connections|rds\.amazonaws\.com`
+            | regexp `_(?P<namespace>[a-z0-9-]+)_(?P<service>[a-z0-9-]+)-[0-9a-f]{64}\.log`
+            | namespace =~ "catalog|user|order|notification|gateway" [5m])) > 3
+        for: 1m
+        labels: {severity: critical, source: loki}
+        annotations:
+          summary: "{{ $labels.service }} logging database errors ({{ $value }} in 5m)"
+      - alert: UpstreamConnectionErrors
+        expr: |
+          sum by (namespace, service) (count_over_time({job="eks-containers"}
+            |~ `ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|TimeoutError|while proxying`
+            | regexp `_(?P<namespace>[a-z0-9-]+)_(?P<service>[a-z0-9-]+)-[0-9a-f]{64}\.log`
+            | namespace =~ "catalog|user|order|notification|gateway" [5m])) > 5
+        for: 1m
+        labels: {severity: warning, source: loki}
+        annotations:
+          summary: "{{ $labels.service }} failing to reach a dependency ({{ $value }} connection errors in 5m)"
+      - alert: AppErrorLogSpike
+        expr: |
+          sum by (namespace, service) (count_over_time({job="eks-containers"}
+            |~ `level\\":\\"error`
+            | regexp `_(?P<namespace>[a-z0-9-]+)_(?P<service>[a-z0-9-]+)-[0-9a-f]{64}\.log`
+            | namespace =~ "catalog|user|order|notification|gateway" [5m])) > 20
+        for: 2m
+        labels: {severity: warning, source: loki}
+        annotations:
+          summary: "{{ $labels.service }} error-level log spike ({{ $value }} in 5m)"
+LOKI_RULES_EOF
 
 # ── Grafana datasources ───────────────────────────────────────────────────────
 # Unquoted heredoc (was quoted 'GRAFANA_DS_EOF' -- switched so
@@ -596,6 +820,9 @@ services:
       - /opt/monitoring/kube:/root/.kube:ro
     command:
       - '--kubeconfig=/root/.kube/config'
+      # kube_node_labels{label_role="chaos"} -- lets node alerts tell the
+      # Spot chaos group apart from app nodes.
+      - '--metric-labels-allowlist=nodes=[role]'
     restart: unless-stopped
 
   loki:
@@ -605,8 +832,13 @@ services:
       - "3100:3100"
     volumes:
       - /opt/monitoring/loki/config.yaml:/etc/loki/config.yaml:ro
+      - /opt/monitoring/loki/rules:/etc/loki/rules:ro
       - loki_data:/loki
-    command: -config.file=/etc/loki/config.yaml
+    environment:
+      - LOKI_ALERTMANAGER_PASSWORD=$MONITORING_BASIC_AUTH_PASSWORD
+    command:
+      - '-config.file=/etc/loki/config.yaml'
+      - '-config.expand-env=true'
     restart: unless-stopped
 
   alertmanager:

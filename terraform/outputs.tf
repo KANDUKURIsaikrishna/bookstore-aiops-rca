@@ -139,3 +139,18 @@ output "notification_db_secret_arn" {
   value       = aws_secretsmanager_secret.db_credentials["notification"].arn
   sensitive   = true
 }
+
+output "rca_webhook_invoke_url" {
+  description = "POST this URL as Alertmanager's webhook receiver to trigger RCA"
+  value       = module.aiops_rca.webhook_invoke_url
+}
+
+output "rca_dashboard_url" {
+  description = "CloudFront URL for the RCA report dashboard"
+  value       = module.aiops_rca.dashboard_url
+}
+
+output "rca_dashboard_read_api_url" {
+  description = "Base URL the dashboard's script.js fetches reports from"
+  value       = module.aiops_rca.dashboard_read_api_url
+}

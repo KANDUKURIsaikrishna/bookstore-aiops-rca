@@ -6,8 +6,10 @@ import jwt from "jsonwebtoken";
 import crypto from "node:crypto";
 import rateLimit from "express-rate-limit";
 import { Registry, collectDefaultMetrics, Counter, Histogram } from "prom-client";
+import { createLogger } from "./logger.js";
 
 const SERVICE_NAME = "user-service";
+const logger = createLogger(SERVICE_NAME);
 
 // ── Short-lived access token + refresh token ────────────────────────────────
 // A bare 1h JWT with no revocation mechanism used to be the whole scheme --
@@ -103,6 +105,21 @@ function verifyJwt(jwtSecret) {
   };
 }
 
+// Dedicated metrics listener (METRICS_PORT, default 9464). Prometheus scrapes
+// through the EKS API-server pod proxy, whose source IPs are the control-plane
+// ENIs in the cluster subnets -- NetworkPolicy opens only this port to them,
+// so the app port stays reachable from api-gateway alone (JWT checks happen
+// there). See docs/TROUBLESHOOTING.md OBS-081.
+export function createMetricsApp() {
+  const app = express();
+  app.disable("x-powered-by");
+  app.get("/metrics", async (_req, res) => {
+    res.set("Content-Type", registry.contentType);
+    res.end(await registry.metrics());
+  });
+  return app;
+}
+
 export function createApp(db, jwtSecret) {
   const app = express();
   // Behind nginx-ingress/ALB -- without this, req.ip (and anything keyed on
@@ -115,7 +132,16 @@ export function createApp(db, jwtSecret) {
   // k8s/services/user-service/base/network-policy.yaml) -- it has no
   // legitimate browser-facing origin to allow.
   app.use(express.json());
-  app.use(morgan("common"));
+  function jsonMorganFormat(tokens, req, res) {
+    return JSON.stringify({
+      method: tokens.method(req, res),
+      url: tokens.url(req, res),
+      status: Number(tokens.status(req, res)),
+      responseTimeMs: Number(tokens["response-time"](req, res)),
+      requestId: req.headers["x-request-id"],
+    });
+  }
+  app.use(morgan(jsonMorganFormat, { stream: { write: (line) => logger.info("http_request", JSON.parse(line)) } }));
 
   app.use((req, res, next) => {
     const start = Date.now();
@@ -146,7 +172,7 @@ export function createApp(db, jwtSecret) {
     db.query("SELECT id FROM users WHERE email = ?", [email], async (err, existing) => {
       try {
         if (err) {
-          console.error("user-service DB error:", err);
+          logger.error("db_error", { error: err.message, stack: err.stack });
           return res.status(500).json({ error: "internal error" });
         }
         if (existing.length > 0) {
@@ -159,7 +185,7 @@ export function createApp(db, jwtSecret) {
         // the row that will hold it, not as a separate promotion step.
         db.query("SELECT COUNT(*) AS count FROM users", async (countErr, countRows) => {
           if (countErr) {
-            console.error("user-service DB error:", countErr);
+            logger.error("db_error", { error: countErr.message, stack: countErr.stack });
             return res.status(500).json({ error: "internal error" });
           }
           const role = countRows[0].count === 0 ? "admin" : "customer";
@@ -169,7 +195,7 @@ export function createApp(db, jwtSecret) {
             [email, passwordHash, role],
             (insertErr, result) => {
               if (insertErr) {
-                console.error("user-service DB error:", insertErr);
+                logger.error("db_error", { error: insertErr.message, stack: insertErr.stack });
                 return res.status(500).json({ error: "internal error" });
               }
               return res.status(201).json({ id: result.insertId, email, role });
@@ -177,7 +203,7 @@ export function createApp(db, jwtSecret) {
           );
         });
       } catch (e) {
-        console.error("user-service DB error:", e);
+        logger.error("db_error", { error: e.message, stack: e.stack });
         return res.status(500).json({ error: "internal error" });
       }
     });
@@ -192,7 +218,7 @@ export function createApp(db, jwtSecret) {
     db.query("SELECT id, email, password_hash, role FROM users WHERE email = ?", [email], async (err, rows) => {
       try {
         if (err) {
-          console.error("user-service DB error:", err);
+          logger.error("db_error", { error: err.message, stack: err.stack });
           return res.status(500).json({ error: "internal error" });
         }
         if (rows.length === 0) {
@@ -218,14 +244,14 @@ export function createApp(db, jwtSecret) {
           [user.id, hashToken(refreshToken), new Date(Date.now() + REFRESH_TOKEN_TTL_MS)],
           (rtErr) => {
             if (rtErr) {
-              console.error("user-service DB error:", rtErr);
+              logger.error("db_error", { error: rtErr.message, stack: rtErr.stack });
               return res.status(500).json({ error: "internal error" });
             }
             return res.status(200).json({ token, refreshToken, role: user.role });
           }
         );
       } catch (e) {
-        console.error("user-service DB error:", e);
+        logger.error("db_error", { error: e.message, stack: e.stack });
         return res.status(500).json({ error: "internal error" });
       }
     });
@@ -242,7 +268,7 @@ export function createApp(db, jwtSecret) {
       [hashToken(refreshToken)],
       (err, rows) => {
         if (err) {
-          console.error("user-service DB error:", err);
+          logger.error("db_error", { error: err.message, stack: err.stack });
           return res.status(500).json({ error: "internal error" });
         }
         if (rows.length === 0) {
@@ -252,7 +278,7 @@ export function createApp(db, jwtSecret) {
 
         db.query("SELECT id, email, role FROM users WHERE id = ?", [existing.user_id], (userErr, userRows) => {
           if (userErr) {
-            console.error("user-service DB error:", userErr);
+            logger.error("db_error", { error: userErr.message, stack: userErr.stack });
             return res.status(500).json({ error: "internal error" });
           }
           // The user row backing this refresh token is gone (deleted
@@ -269,7 +295,7 @@ export function createApp(db, jwtSecret) {
           const newRefreshToken = generateRefreshToken();
           db.query("UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = ?", [existing.id], (revokeErr) => {
             if (revokeErr) {
-              console.error("user-service DB error:", revokeErr);
+              logger.error("db_error", { error: revokeErr.message, stack: revokeErr.stack });
               return res.status(500).json({ error: "internal error" });
             }
             db.query(
@@ -277,7 +303,7 @@ export function createApp(db, jwtSecret) {
               [user.id, hashToken(newRefreshToken), new Date(Date.now() + REFRESH_TOKEN_TTL_MS)],
               (insertErr) => {
                 if (insertErr) {
-                  console.error("user-service DB error:", insertErr);
+                  logger.error("db_error", { error: insertErr.message, stack: insertErr.stack });
                   return res.status(500).json({ error: "internal error" });
                 }
                 const newAccessToken = jwt.sign({ userId: user.id, email: user.email, role: user.role }, jwtSecret, {
@@ -305,7 +331,7 @@ export function createApp(db, jwtSecret) {
       [hashToken(refreshToken)],
       (err) => {
         if (err) {
-          console.error("user-service DB error:", err);
+          logger.error("db_error", { error: err.message, stack: err.stack });
           return res.status(500).json({ error: "internal error" });
         }
         // Always 200, whether or not a matching row existed -- don't leak
@@ -321,7 +347,7 @@ export function createApp(db, jwtSecret) {
       [req.user.userId],
       (err, rows) => {
         if (err) {
-          console.error("user-service DB error:", err);
+          logger.error("db_error", { error: err.message, stack: err.stack });
           return res.status(500).json({ error: "internal error" });
         }
         if (rows.length === 0) return res.status(404).json({ error: "user not found" });
@@ -332,3 +358,5 @@ export function createApp(db, jwtSecret) {
 
   return app;
 }
+
+export { logger };

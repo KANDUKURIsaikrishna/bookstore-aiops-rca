@@ -1,0 +1,19 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: drill-pod-failure-order
+  namespace: order
+  annotations:
+    drill.bookstore.io/fault-service: order-service
+    drill.bookstore.io/category: pod-unavailable
+    drill.bookstore.io/root-cause: "order-service container replaced with a pause image for 5m; pod NotReady, /orders and /cart fail at api-gateway"
+    drill.bookstore.io/expected-alerts: "PodNotReady,DeploymentDown,ServiceTargetDown,HighErrorRate"
+    drill.bookstore.io/duration: "6m"
+spec:
+  action: pod-failure
+  mode: one
+  duration: "5m"
+  selector:
+    namespaces: [order]
+    labelSelectors:
+      app: order-service

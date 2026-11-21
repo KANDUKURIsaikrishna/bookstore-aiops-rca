@@ -38,6 +38,15 @@ spec:
           - service: api-gateway
             namespace: gateway
 
+  # Lets scripts/chaos_drill.py pause auto-sync on ONE app for the length of
+  # a bad-deploy / bad-config drill (selfHeal would revert the injected fault
+  # within minutes otherwise). Without this, the ApplicationSet controller
+  # rewrites the generated Application's spec straight back. The drill script
+  # always restores the automated policy afterward, even on Ctrl-C.
+  ignoreApplicationDifferences:
+    - jsonPointers:
+        - /spec/syncPolicy/automated
+
   template:
     metadata:
       name: '{{service}}'
@@ -47,7 +56,7 @@ spec:
       project: bookstore   # scoped AppProject, see k8s/argocd/appproject.yaml -- apply that first
 
       source:
-        repoURL: https://github.com/KANDUKURIsaikrishna/aws_three_tier_archi_observability.git
+        repoURL: https://github.com/KANDUKURIsaikrishna/bookstore-aiops-rca.git
         targetRevision: main
         path: 'k8s/services/{{service}}/overlays/prod'
         kustomize: {}

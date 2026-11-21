@@ -23,3 +23,21 @@ variable "aws_region" {
   type        = string
 }
 
+variable "secrets_recovery_window_days" {
+  description = "recovery_window_in_days for this module's Secrets Manager secrets (grafana_admin, monitoring_basic_auth). 0 = force delete (this project's dev-cycle default, see TF-012); 7-30 for a real production account."
+  type        = number
+  default     = 0
+}
+
+
+variable "enable_chaos_mesh" {
+  description = "Install Chaos Mesh (chaos-mesh namespace) for RCA calibration drills. Off by default. Pairs with enable_chaos_node_group, but works without it -- the controller prefers chaos nodes and falls back to app nodes."
+  type        = bool
+  default     = false
+}
+
+variable "chaos_mesh_chart_version" {
+  description = "Pinned Chaos Mesh Helm chart version (https://charts.chaos-mesh.org)."
+  type        = string
+  default     = "2.8.6"
+}

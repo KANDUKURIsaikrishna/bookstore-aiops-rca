@@ -1,0 +1,6 @@
+body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+.report-row { border: 1px solid #ccc; border-radius: 4px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; cursor: pointer; }
+.report-row:hover { background: #f5f5f5; }
+.report-row .severity-critical { color: #c00; font-weight: bold; }
+.report-row .severity-warning { color: #b58900; font-weight: bold; }
+pre#detail-narrative { white-space: pre-wrap; background: #f5f5f5; padding: 1rem; border-radius: 4px; }

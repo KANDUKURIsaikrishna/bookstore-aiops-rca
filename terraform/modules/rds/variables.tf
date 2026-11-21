@@ -113,3 +113,9 @@ variable "skip_final_snapshot" {
   type        = bool
   default     = false
 }
+
+variable "secrets_recovery_window_days" {
+  description = "recovery_window_in_days for this module's Secrets Manager secret. 0 = force delete (this project's dev-cycle default, see TF-012); 7-30 for a real production account. Passed down from the root module's own variable of the same name."
+  type        = number
+  default     = 0
+}

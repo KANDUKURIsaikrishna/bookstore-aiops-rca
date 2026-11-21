@@ -83,6 +83,29 @@ def main():
     alert_email      = cfg["ALERT_EMAIL"]
     github_branch    = cfg.get("GITHUB_BRANCH") or "main"
     secondary_region = cfg.get("SECONDARY_REGION") or "us-west-2"
+    llm_api_key      = cfg.get("LLM_API_KEY") or cfg.get("CLAUDE_API_KEY") or ""
+    llm_provider     = cfg.get("LLM_PROVIDER") or "anthropic"
+
+    # Per-provider default model ID, only used when LLM_MODEL is left blank in
+    # config.env -- matches each provider's own cheapest current small model,
+    # same reasoning as the Lambda's Haiku default (structured log
+    # summarization, not deep reasoning, so cost-per-token dominates).
+    _default_models = {
+        "anthropic": "claude-haiku-4-5-20251001",
+        "openai": "gpt-4o-mini",
+        "gemini": "gemini-3.8-flash",
+    }
+    llm_model = cfg.get("LLM_MODEL") or _default_models.get(llm_provider, _default_models["anthropic"])
+
+    # Chaos drills (k8s/chaos/README.md). Off unless config.env turns them on;
+    # written every run so removing a line from config.env really turns it off.
+    def _flag(key):
+        return (cfg.get(key) or "").strip().lower() in ("1", "true", "yes", "on")
+    enable_chaos_mesh = _flag("ENABLE_CHAOS_MESH")
+    enable_chaos_nodes = _flag("ENABLE_CHAOS_NODE_GROUP")
+    chaos_desired = cfg.get("CHAOS_NODE_DESIRED_SIZE") or "0"
+    if not chaos_desired.isdigit():
+        sys.exit(f"\nERROR: CHAOS_NODE_DESIRED_SIZE must be a whole number, got {chaos_desired!r}\n")
 
     print(f"\nConfiguring project with:")
     print(f"  Account    : {account_id}")
@@ -92,6 +115,10 @@ def main():
     print(f"  Repo       : {github_repo}")
     print(f"  Branch     : {github_branch}")
     print(f"  Alerts     : {alert_email}")
+    print(f"  LLM key    : {'(set)' if llm_api_key else '(not set -- RCA narratives skipped until populated)'}")
+    print(f"  LLM provider: {llm_provider} ({llm_model})")
+    print(f"  Chaos      : mesh={'on' if enable_chaos_mesh else 'off'}, "
+          f"node group={'on' if enable_chaos_nodes else 'off'} (desired {chaos_desired})")
     print()
 
     # ── 1. terraform/terraform.tfvars ────────────────────────────────────────
@@ -107,7 +134,13 @@ def main():
         f'secondary_region = "{secondary_region}"\n'
         f'domain           = "{domain}"\n'
         f'github_repo      = "{github_repo}"\n'
-        f'alert_email      = "{alert_email}"\n',
+        f'alert_email      = "{alert_email}"\n'
+        f'llm_api_key      = "{llm_api_key}"\n'
+        f'llm_provider     = "{llm_provider}"\n'
+        f'claude_model     = "{llm_model}"\n'
+        f'enable_chaos_mesh       = {str(enable_chaos_mesh).lower()}\n'
+        f'enable_chaos_node_group = {str(enable_chaos_nodes).lower()}\n'
+        f'chaos_node_desired_size = {chaos_desired}\n',
         encoding="utf-8",
     )
     print(f"  [ok]  terraform/terraform.tfvars  (generated)")
@@ -194,8 +227,11 @@ the apply itself, and the post-apply verification steps.
 Note: config.env and terraform/terraform.tfvars are gitignored -- never
 commit them. This is a config-drift script, not a one-time fix: re-run it
 any time config.env changes (new domain, new AWS account, new repo, new
-branch), and remember to commit + push the k8s/ changes it makes -- ArgoCD
-only ever syncs from git, never from local disk.
+branch, a rotated LLM API key), and remember to commit + push the k8s/
+changes it makes -- ArgoCD only ever syncs from git, never from local disk.
+An LLM_API_KEY change alone needs no k8s/ commit -- just `terraform apply`
+after this script (it only touches terraform.tfvars, a Lambda's env var and
+a Secrets Manager value, not anything ArgoCD deploys).
 """)
 
 

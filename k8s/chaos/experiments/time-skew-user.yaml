@@ -1,0 +1,20 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: TimeChaos
+metadata:
+  name: drill-time-skew-user
+  namespace: user
+  annotations:
+    drill.bookstore.io/fault-service: user-service
+    drill.bookstore.io/category: clock-skew
+    drill.bookstore.io/root-cause: "user-service clock skewed -2h; JWTs it issues are already expired when api-gateway verifies them, so authenticated requests get 401"
+    drill.bookstore.io/expected-alerts: "none (4xx only) -- tests RCA on a silent failure"
+    drill.bookstore.io/duration: "6m"
+spec:
+  mode: all
+  selector:
+    namespaces: [user]
+    labelSelectors:
+      app: user-service
+  containerNames: [user-service]
+  timeOffset: "-2h"
+  duration: "5m"

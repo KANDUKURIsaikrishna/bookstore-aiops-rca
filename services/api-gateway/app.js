@@ -6,8 +6,10 @@ import jwt from "jsonwebtoken";
 import rateLimit from "express-rate-limit";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import { Registry, collectDefaultMetrics, Counter, Histogram } from "prom-client";
+import { createLogger } from "./logger.js";
 
 const SERVICE_NAME = "api-gateway";
+const logger = createLogger(SERVICE_NAME);
 
 const registry = new Registry();
 registry.setDefaultLabels({ service: SERVICE_NAME });
@@ -93,6 +95,21 @@ const gatewayRateLimiter = rateLimit({
 });
 
 // targets = { catalog: url, user: url, order: url }
+// Dedicated metrics listener (METRICS_PORT, default 9464). Prometheus scrapes
+// through the EKS API-server pod proxy, whose source IPs are the control-plane
+// ENIs in the cluster subnets -- NetworkPolicy opens only this port to them,
+// so the app port stays reachable from api-gateway alone (JWT checks happen
+// there). See docs/TROUBLESHOOTING.md OBS-081.
+export function createMetricsApp() {
+  const app = express();
+  app.disable("x-powered-by");
+  app.get("/metrics", async (_req, res) => {
+    res.set("Content-Type", registry.contentType);
+    res.end(await registry.metrics());
+  });
+  return app;
+}
+
 export function createApp(jwtSecret, targets) {
   const app = express();
   // Behind nginx-ingress/ALB -- without this, req.ip (and anything keyed on
@@ -104,7 +121,16 @@ export function createApp(jwtSecret, targets) {
   // is the one service in the platform actually reachable from a browser.
   app.use(cors({ origin: process.env.FRONTEND_URL || "http://localhost:3000" }));
   app.use(gatewayRateLimiter);
-  app.use(morgan("common"));
+  function jsonMorganFormat(tokens, req, res) {
+    return JSON.stringify({
+      method: tokens.method(req, res),
+      url: tokens.url(req, res),
+      status: Number(tokens.status(req, res)),
+      responseTimeMs: Number(tokens["response-time"](req, res)),
+      requestId: req.headers["x-request-id"],
+    });
+  }
+  app.use(morgan(jsonMorganFormat, { stream: { write: (line) => logger.info("http_request", JSON.parse(line)) } }));
   // Deliberately NO express.json() here — every sibling service uses
   // app.use(express.json()), but the gateway must not. http-proxy-middleware
   // forwards the raw incoming request stream to the upstream service; if
@@ -157,3 +183,5 @@ export function createApp(jwtSecret, targets) {
 
   return app;
 }
+
+export { logger };

@@ -22,6 +22,8 @@ terraform/environments/*.tfvars
 # Python
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
 
 # Node
 node_modules/
@@ -35,6 +37,10 @@ client/build/
 *.tfstate.*
 *.tfstate.backup
 .terraform/
+
+# Lambda zip build output (data.archive_file, regenerated every apply from
+# lambdas/*/lambda_function.py) — never committed
+terraform/modules/aiops-rca/build/
 # tfplan* (not just the bare "tfplan"/"*.tfplan" names) -- plan files can
 # contain sensitive resource values in plaintext (unlike `terraform show
 # -json`'s output, the raw plan file is never redacted) and easy to end up
@@ -75,3 +81,21 @@ terraform-execution-flow-prompt.txt
 
 # Blog series planning/drafts — personal content, never committed
 blog/
+
+# Full project narrative (what's been added across sessions and why) —
+# personal reference doc, not shipped documentation. Actually gitignored,
+# unlike terraform-explained.md/k8s-explained.md/terraform-dependency-graph.md/
+# k8s-dependency-graph.md, which claim to be but aren't (git tracks them --
+# pre-existing inconsistency, not introduced here).
+project-explained.md
+
+# superpowers planning artifacts (specs/plans from brainstorming/writing-plans
+# skill sessions) — local planning scratch, never committed. The specs file
+# was previously tracked (commit b60c89f); untracked via `git rm --cached`
+# to match this rule going forward.
+docs/superpowers/
+
+# AWS resource/cost audit reports — contain account IDs, bucket names, and
+# billing data, never committed
+AWS_RESOURCE_AUDIT.md
+DESTROY_LOG.md

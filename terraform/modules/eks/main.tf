@@ -184,3 +184,109 @@ resource "aws_eks_node_group" "this" {
     ignore_changes = [launch_template[0].version]
   }
 }
+
+# ── Chaos Node Group (Spot, ephemeral, opt-in) ────────────────────────────────
+# Separate from aws_eks_node_group.this on purpose: fault-injection workloads
+# (Chaos Mesh's chaos-daemon DaemonSet, deliberately-targeted test pods)
+# should never compete with the always-on app node group for capacity or
+# quota. Treating the account's EC2 on-demand vCPU quota as a hard 8
+# regardless of the current live value (see aws_eks_node_group.this's
+# ignore_changes comment above -- same 8, deliberately not relied on going
+# higher) means there's no safe on-demand headroom to grow into here.
+# capacity_type = "SPOT" draws from a separate EC2 quota bucket ("All
+# Standard ... Spot Instance Requests") than that on-demand 8, so this node
+# group can exist without eating into it at all.
+#
+# Own launch template carrying the same node-user-data as the app nodes
+# (node-exporter + Fluent Bit). Without it, chaos nodes still got picked up
+# by the monitoring EC2's node discovery (every instance tagged
+# eks:cluster-name), sat at up==0 with nothing on :9100, and fired a false
+# NodeDown ~5m after every scale-up -- and logs from pods placed on them
+# never reached Loki, so drills run there had no evidence for the RCA.
+# Separate from aws_launch_template.nodes so the app node group's pinned
+# version (see its ignore_changes) is untouched.
+resource "aws_launch_template" "chaos" {
+  count       = var.enable_chaos_node_group ? 1 : 0
+  name_prefix = "${var.prefix}-chaos-node-"
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+    ebs {
+      volume_type           = "gp3"
+      volume_size           = 20
+      encrypted             = true
+      delete_on_termination = true
+    }
+  }
+
+  user_data = base64encode(templatefile("${path.module}/node-user-data.sh.tftpl", {
+    cluster_name = var.cluster_name
+    region       = var.region
+  }))
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+    tags          = { Name = "${var.prefix}-eks-chaos-node" }
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_eks_node_group" "chaos" {
+  count = var.enable_chaos_node_group ? 1 : 0
+
+  cluster_name    = aws_eks_cluster.this.name
+  node_group_name = "${var.prefix}-chaos-node-group"
+  node_role_arn   = aws_iam_role.node_group.arn
+  subnet_ids      = var.subnet_ids
+
+  instance_types = var.chaos_node_instance_types
+  capacity_type  = "SPOT"
+  ami_type       = "AL2_x86_64"
+
+  # Not pinned like the app node group: Spot capacity draws from its own
+  # quota bucket, so a rolling replace here never hits the on-demand vCPU
+  # ceiling that forced that pin.
+  launch_template {
+    id      = aws_launch_template.chaos[0].id
+    version = aws_launch_template.chaos[0].latest_version
+  }
+
+  scaling_config {
+    min_size     = 0
+    max_size     = var.chaos_node_max_size
+    desired_size = var.chaos_node_desired_size
+  }
+
+  update_config {
+    max_unavailable = 1
+  }
+
+  # NoSchedule taint keeps ordinary app pods off Spot capacity that can be
+  # reclaimed by AWS at any time -- only pods with a matching toleration
+  # (Chaos Mesh's chaos-daemon, or whatever you're deliberately testing)
+  # land here.
+  taint {
+    key    = "chaos"
+    value  = "true"
+    effect = "NO_SCHEDULE"
+  }
+
+  labels = {
+    role = "chaos"
+  }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.node_worker,
+    aws_iam_role_policy_attachment.node_cni,
+    aws_iam_role_policy_attachment.node_ecr_readonly,
+  ]
+}

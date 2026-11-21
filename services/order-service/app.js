@@ -2,8 +2,10 @@ import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 import { Registry, collectDefaultMetrics, Counter, Histogram } from "prom-client";
+import { createLogger } from "./logger.js";
 
 const SERVICE_NAME = "order-service";
+const logger = createLogger(SERVICE_NAME);
 
 const registry = new Registry();
 registry.setDefaultLabels({ service: SERVICE_NAME });
@@ -48,6 +50,21 @@ function dispatchNotification(notifyFn, orderId) {
   });
 }
 
+// Dedicated metrics listener (METRICS_PORT, default 9464). Prometheus scrapes
+// through the EKS API-server pod proxy, whose source IPs are the control-plane
+// ENIs in the cluster subnets -- NetworkPolicy opens only this port to them,
+// so the app port stays reachable from api-gateway alone (JWT checks happen
+// there). See docs/TROUBLESHOOTING.md OBS-081.
+export function createMetricsApp() {
+  const app = express();
+  app.disable("x-powered-by");
+  app.get("/metrics", async (_req, res) => {
+    res.set("Content-Type", registry.contentType);
+    res.end(await registry.metrics());
+  });
+  return app;
+}
+
 export function createApp(db, notifyFn) {
   const app = express();
   // Behind nginx-ingress/ALB -- without this, req.ip (and anything keyed on
@@ -59,7 +76,16 @@ export function createApp(db, notifyFn) {
   // k8s/services/order-service/base/network-policy.yaml) -- it has no
   // legitimate browser-facing origin to allow.
   app.use(express.json());
-  app.use(morgan("common"));
+  function jsonMorganFormat(tokens, req, res) {
+    return JSON.stringify({
+      method: tokens.method(req, res),
+      url: tokens.url(req, res),
+      status: Number(tokens.status(req, res)),
+      responseTimeMs: Number(tokens["response-time"](req, res)),
+      requestId: req.headers["x-request-id"],
+    });
+  }
+  app.use(morgan(jsonMorganFormat, { stream: { write: (line) => logger.info("http_request", JSON.parse(line)) } }));
 
   app.use((req, res, next) => {
     const start = Date.now();
@@ -87,7 +113,7 @@ export function createApp(db, notifyFn) {
       [req.userId],
       (err, rows) => {
         if (err) {
-          console.error("order-service DB error:", err);
+          logger.error("db_error", { error: err.message, stack: err.stack });
           return res.status(500).json({ error: "internal error" });
         }
         return res.status(200).json(rows);
@@ -117,7 +143,7 @@ export function createApp(db, notifyFn) {
       [req.userId, book_id, quantity, quantity],
       (err) => {
         if (err) {
-          console.error("order-service DB error:", err);
+          logger.error("db_error", { error: err.message, stack: err.stack });
           return res.status(500).json({ error: "internal error" });
         }
         return res.status(200).json({ book_id, quantity });
@@ -131,7 +157,7 @@ export function createApp(db, notifyFn) {
       [req.userId, req.params.bookId],
       (err, result) => {
         if (err) {
-          console.error("order-service DB error:", err);
+          logger.error("db_error", { error: err.message, stack: err.stack });
           return res.status(500).json({ error: "internal error" });
         }
         return res.status(200).json(result);
@@ -184,7 +210,7 @@ export function createApp(db, notifyFn) {
       if (connection) {
         await connection.rollback();
       }
-      console.error("order-service DB error:", err);
+      logger.error("db_error", { error: err.message, stack: err.stack });
       res.status(500).json({ error: "internal error" });
     } finally {
       if (connection) connection.release();
@@ -211,7 +237,7 @@ export function createApp(db, notifyFn) {
       [req.userId, book_id, quantity],
       (err, result) => {
         if (err) {
-          console.error("order-service DB error:", err);
+          logger.error("db_error", { error: err.message, stack: err.stack });
           return res.status(500).json({ error: "internal error" });
         }
         const order = { id: result.insertId, book_id, quantity, status: "pending" };
@@ -227,7 +253,7 @@ export function createApp(db, notifyFn) {
       [req.userId],
       (err, rows) => {
         if (err) {
-          console.error("order-service DB error:", err);
+          logger.error("db_error", { error: err.message, stack: err.stack });
           return res.status(500).json({ error: "internal error" });
         }
         return res.status(200).json(rows);
@@ -241,7 +267,7 @@ export function createApp(db, notifyFn) {
       [req.params.id, req.userId],
       (err, rows) => {
         if (err) {
-          console.error("order-service DB error:", err);
+          logger.error("db_error", { error: err.message, stack: err.stack });
           return res.status(500).json({ error: "internal error" });
         }
         if (rows.length === 0) return res.status(404).json({ error: "order not found" });
@@ -252,3 +278,5 @@ export function createApp(db, notifyFn) {
 
   return app;
 }
+
+export { logger };

@@ -1,0 +1,27 @@
+# Repeated container-kill via a Schedule: one kill every 30s until the drill
+# script deletes it. kubelet's restart backoff turns this into a real
+# CrashLoopBackOff.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: Schedule
+metadata:
+  name: drill-crashloop-user
+  namespace: user
+  annotations:
+    drill.bookstore.io/fault-service: user-service
+    drill.bookstore.io/category: crash-loop
+    drill.bookstore.io/root-cause: "user-service container killed every 30s; CrashLoopBackOff, /auth and /users fail at api-gateway"
+    drill.bookstore.io/expected-alerts: "PodCrashLooping,ContainerWaiting,PodNotReady,HighErrorRate"
+    drill.bookstore.io/duration: "8m"
+spec:
+  schedule: "@every 30s"
+  type: PodChaos
+  historyLimit: 2
+  concurrencyPolicy: Forbid
+  podChaos:
+    action: container-kill
+    mode: one
+    containerNames: [user-service]
+    selector:
+      namespaces: [user]
+      labelSelectors:
+        app: user-service

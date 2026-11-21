@@ -1,0 +1,23 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: drill-stress-cpu-catalog
+  namespace: catalog
+  annotations:
+    drill.bookstore.io/fault-service: catalog-service
+    drill.bookstore.io/category: cpu-saturation
+    drill.bookstore.io/root-cause: "CPU saturation inside catalog-service container (stress workers at its 250m limit); CFS throttling slows request handling"
+    drill.bookstore.io/expected-alerts: "PodCPUNearLimit,CPUThrottlingHigh,HighLatencyP95"
+    drill.bookstore.io/duration: "8m"
+spec:
+  mode: one
+  selector:
+    namespaces: [catalog]
+    labelSelectors:
+      app: catalog-service
+  containerNames: [catalog-service]
+  stressors:
+    cpu:
+      workers: 2
+      load: 100
+  duration: "7m"

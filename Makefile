@@ -7,6 +7,10 @@ TF_DIR = terraform
 # itself, not a fixed path like the Secrets Manager imports above it.
 ALERT_EMAIL = $(shell grep -E '^ALERT_EMAIL=' config.env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"' \r')
 
+# Only used by `import`'s CloudTrail bucket line below -- the bucket name is
+# account-derived (bookstore-cloudtrail-<account_id>), not a fixed string.
+ACCOUNT_ID = $(shell aws sts get-caller-identity --query Account --output text 2>/dev/null)
+
 # ── Setup ─────────────────────────────────────────────────────────────────────
 
 # Toolchain check -- terraform/kubectl/aws/python3 versions + PATH, AWS creds,
@@ -54,6 +58,22 @@ import:
 	terraform -chdir=$(TF_DIR) import \
 	  aws_sesv2_email_identity.alerts \
 	  $(ALERT_EMAIL) 2>/dev/null || echo "SES email identity already in state (or ALERT_EMAIL not set)"
+	# Different class of problem from the four imports above (those are all
+	# "state got lost, but the AWS resource itself is fully destroyable").
+	# aws_s3_bucket.cloudtrail is a PERMANENT, by-design exception: S3 Object
+	# Lock (COMPLIANCE mode, terraform/cloudtrail.tf) means the bucket can
+	# never actually be deleted while it holds any log object still inside
+	# its retention window (var.cloudtrail_retention_days, default 400 days)
+	# -- confirmed live 2026-09-17, `terraform destroy` fails on this bucket
+	# specifically with BucketNotEmpty every single time, on purpose, and the
+	# bucket has to be removed from state (`terraform state rm
+	# aws_s3_bucket.cloudtrail`) after every destroy so it doesn't block the
+	# NEXT apply from trying (and failing) to create a bucket that already
+	# exists. This import re-adopts that same surviving bucket instead.
+	# See docs/DEPLOYMENT.md's "Tearing it down" section.
+	terraform -chdir=$(TF_DIR) import \
+	  aws_s3_bucket.cloudtrail \
+	  bookstore-cloudtrail-$(ACCOUNT_ID) 2>/dev/null || echo "cloudtrail bucket already in state (or AWS creds not configured)"
 
 plan: preflight init
 	terraform -chdir=$(TF_DIR) plan
@@ -63,7 +83,16 @@ apply: preflight init import
 	terraform -chdir=$(TF_DIR) apply -auto-approve
 
 destroy:
-	terraform -chdir=$(TF_DIR) destroy -auto-approve
+	terraform -chdir=$(TF_DIR) destroy -auto-approve || true
+	# aws_s3_bucket.cloudtrail's own destroy always fails above -- S3 Object
+	# Lock (COMPLIANCE mode) means it can't actually be deleted while it
+	# holds any log object still inside its retention window, by design
+	# (confirmed live 2026-09-17: BucketNotEmpty, every time, deliberately).
+	# Untrack it here so it can't block the next `terraform plan`/`apply`
+	# from trying to create a bucket that still exists -- `make import`
+	# (or `make apply`, which runs import first) re-adopts it later. The
+	# bucket itself, and the audit trail inside it, are untouched by this.
+	terraform -chdir=$(TF_DIR) state rm aws_s3_bucket.cloudtrail 2>/dev/null || true
 
 # ── Monitoring helpers ────────────────────────────────────────────────────────
 

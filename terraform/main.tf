@@ -41,6 +41,13 @@ module "rds" {
   # enough to silently create a live cross-region secret replica on every
   # apply, DR intent or not. See OBS-049.
   secondary_region = var.enable_dr_replication ? var.secondary_region : ""
+
+  secrets_recovery_window_days = var.secrets_recovery_window_days
+
+  # Off unless var.enable_rds_secret_rotation is true -- see
+  # rds-secret-rotation.tf for what deploys the Lambda this ARN points at.
+  rotation_lambda_arn = var.enable_rds_secret_rotation ? aws_serverlessapplicationrepository_cloudformation_stack.rds_rotation[0].outputs["RotationLambdaARN"] : ""
+  rotation_days       = var.rds_secret_rotation_days
 }
 
 # ── Per-service DB credentials ─────────────────────────────────────────────────
@@ -69,7 +76,7 @@ resource "random_password" "db_credentials" {
 resource "aws_secretsmanager_secret" "db_credentials" {
   for_each                = local.db_service_credentials
   name                    = "/bookstore/${each.key}-db-credentials"
-  recovery_window_in_days = 0 # 0 = force delete on destroy, matches modules/rds pattern
+  recovery_window_in_days = var.secrets_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "db_credentials" {
@@ -95,7 +102,7 @@ resource "random_password" "jwt_secret" {
 
 resource "aws_secretsmanager_secret" "jwt_secret" {
   name                    = "/bookstore/jwt-secret"
-  recovery_window_in_days = 0
+  recovery_window_in_days = var.secrets_recovery_window_days
 }
 
 resource "aws_secretsmanager_secret_version" "jwt_secret" {
@@ -192,6 +199,10 @@ module "eks" {
   node_desired_size  = 3 # t3.medium caps at 17 pods (ENI IP limit); 2 nodes (34 slots) filled up once all 5 microservices + api-gateway (2 replicas) joined the monolith — see TF-014, OBS-030
   region             = var.aws_region
 
+  enable_chaos_node_group = var.enable_chaos_node_group
+  chaos_node_max_size     = var.chaos_node_max_size
+  chaos_node_desired_size = var.chaos_node_desired_size
+
   # Whoever runs `terraform apply` always gets cluster-admin, regardless of who
   # originally created the cluster — see TF-013 in docs/phase-2-troubleshooting.md.
   admin_principal_arns = concat(
@@ -245,7 +256,7 @@ resource "aws_iam_access_key" "ses_smtp" {
 
 resource "aws_secretsmanager_secret" "alertmanager_smtp" {
   name                    = "/bookstore/alertmanager-smtp"
-  recovery_window_in_days = 0
+  recovery_window_in_days = var.secrets_recovery_window_days
 }
 
 # No aws_secretsmanager_secret_version here on purpose -- the SMTP password
@@ -290,9 +301,12 @@ resource "aws_eip" "monitoring" {
 module "monitoring_ec2" {
   source = "./modules/monitoring-ec2"
 
-  vpc_id                    = module.network.vpc_id
-  vpc_cidr                  = local.vpc_cidr
-  public_subnet_id          = module.network.public_subnet_ids[0]
+  vpc_id           = module.network.vpc_id
+  vpc_cidr         = local.vpc_cidr
+  public_subnet_id = module.network.public_subnet_ids[0]
+  # .123 is the address the instance already holds -- pinning the current
+  # value means no change on the live box, only on future replacements.
+  private_ip                = cidrhost(local.public_subnets[0].cidr, 123)
   eip_allocation_id         = aws_eip.monitoring.id
   cluster_name              = module.eks.cluster_name
   region                    = var.aws_region
@@ -323,6 +337,43 @@ module "monitoring_ec2" {
   # it, so without this the instance could boot and fetch the secret before
   # the SMTP password has been written.
   depends_on = [null_resource.ses_smtp_password]
+
+  rca_lambda_sg_id = module.aiops_rca.lambda_security_group_id
+  rca_webhook_url  = module.aiops_rca.webhook_invoke_url
+}
+
+module "aiops_rca" {
+  source = "./modules/aiops-rca"
+
+  vpc_id            = module.network.vpc_id
+  lambda_subnet_ids = [module.network.private_subnet_ids[4], module.network.private_subnet_ids[5]]
+  ses_identity_arn  = aws_sesv2_email_identity.alerts.arn
+  alert_email       = var.alert_email
+  region            = var.aws_region
+  account_id        = data.aws_caller_identity.current.account_id
+
+  llm_api_key                  = var.llm_api_key
+  llm_provider                 = var.llm_provider
+  claude_model                 = var.claude_model
+  secrets_recovery_window_days = var.secrets_recovery_window_days
+}
+
+resource "aws_api_gateway_rest_api_policy" "rca_webhook" {
+  rest_api_id = module.aiops_rca.webhook_rest_api_id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = "*"
+      Action    = "execute-api:Invoke"
+      Resource  = "${module.aiops_rca.webhook_rest_api_arn}/*/*/*"
+      Condition = {
+        IpAddress = {
+          "aws:SourceIp" = ["${module.monitoring_ec2.instance_public_ip}/32"]
+        }
+      }
+    }]
+  })
 }
 
 # ── EKS Add-ons ────────────────────────────────────────────────────────────────
@@ -334,6 +385,9 @@ module "eks_addons" {
   oidc_provider_url = module.eks.oidc_provider_url
   aws_region        = var.aws_region
   node_role_name    = module.eks.node_role_name
+
+  secrets_recovery_window_days = var.secrets_recovery_window_days
+  enable_chaos_mesh            = var.enable_chaos_mesh
 
   # module.network explicitly, not just module.eks: nothing in eks_addons
   # references the NAT gateway's ID directly (EKS/node group reference

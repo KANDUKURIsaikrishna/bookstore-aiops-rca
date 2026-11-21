@@ -11,10 +11,10 @@ Two independent simulations, run either or both:
              sent with the api-gateway Host header (the ALB routes on Host)
 
 The demo alerts (HighPodCPUUsage / HighRequestRate) use 1m rate windows and
-a 20s `for:` hold, and Prometheus scrapes every 10s, so with sustained load
-they fire ~90-120s after load start and the email lands ~10s later. A very
+a 1m `for:` hold, and Prometheus scrapes every 10s, so with sustained load
+they fire ~2-3 min after load start and the email lands ~10s later. A very
 short --duration still just prints "nothing firing yet" and exits -- give it
---duration 240 for a comfortable margin.
+--duration 300 for a comfortable margin.
 
 Always cleans up after itself (stress pod deleted, request loop stopped) on
 normal exit, Ctrl-C, or an error partway through.

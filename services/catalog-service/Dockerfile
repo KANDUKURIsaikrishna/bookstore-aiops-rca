@@ -1,10 +1,13 @@
-FROM node:22-alpine AS deps
+# Pinned by digest for build reproducibility/supply-chain provenance (Finding SUPPLY-3).
+# Dependabot (docker ecosystem, see .github/dependabot.yml) bumps this automatically;
+# apk upgrade --no-cache below still keeps in-image packages current between bumps.
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS deps
 
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-FROM node:22-alpine AS runtime
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runtime
 
 RUN apk upgrade --no-cache
 

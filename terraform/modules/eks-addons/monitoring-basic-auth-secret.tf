@@ -16,7 +16,7 @@ resource "random_password" "monitoring_basic_auth" {
 
 resource "aws_secretsmanager_secret" "monitoring_basic_auth" {
   name                    = "/bookstore/monitoring-basic-auth"
-  recovery_window_in_days = 0 # 0 = force delete on destroy, no soft-delete window — see TF-012
+  recovery_window_in_days = var.secrets_recovery_window_days # see TF-012; 0 by default, override for production
 }
 
 resource "aws_secretsmanager_secret_version" "monitoring_basic_auth" {

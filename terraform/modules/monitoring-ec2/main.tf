@@ -88,6 +88,16 @@ resource "aws_security_group_rule" "eks_scrape_node_exporter" {
   description              = "Prometheus on monitoring EC2 scrapes node-exporter systemd service"
 }
 
+resource "aws_security_group_rule" "rca_lambda_query_loki" {
+  type                     = "ingress"
+  from_port                = 3100
+  to_port                  = 3100
+  protocol                 = "tcp"
+  source_security_group_id = var.rca_lambda_sg_id
+  security_group_id        = aws_security_group.monitoring.id
+  description              = "RCA Lambda queries Loki HTTP API"
+}
+
 # Allow the monitoring EC2's kube-state-metrics container to reach the EKS API
 # server. `var.eks_cluster_sg_id` is actually the cluster security group (see the
 # module.eks call site) -- without this, kube-state-metrics can resolve the
@@ -219,9 +229,14 @@ resource "aws_key_pair" "monitoring" {
 # ── EC2 Instance ───────────────────────────────────────────────────────────────
 
 resource "aws_instance" "monitoring" { # nosemgrep: aws-ec2-has-public-ip
-  ami                         = data.aws_ami.ubuntu.id
-  instance_type               = var.instance_type
-  subnet_id                   = var.public_subnet_id
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type
+  subnet_id     = var.public_subnet_id
+  # Fixed, so replacing this instance (any user-data change does, see
+  # user_data_replace_on_change) never moves Loki out from under Fluent Bit
+  # on already-running nodes. The old instance is destroyed before the new
+  # one is created (no create_before_destroy), which frees the address.
+  private_ip                  = var.private_ip
   vpc_security_group_ids      = [aws_security_group.monitoring.id]
   iam_instance_profile        = aws_iam_instance_profile.monitoring.name
   key_name                    = aws_key_pair.monitoring.key_name
@@ -257,6 +272,7 @@ resource "aws_instance" "monitoring" { # nosemgrep: aws-ec2-has-public-ip
     eks_api_host                      = local.eks_api_host
     custom_dashboard_json             = file("${path.module}/dashboards/pod-node-resources.json")
     cluster_dashboard_json            = file("${path.module}/dashboards/k8s-cluster-overview.json")
+    rca_webhook_url                   = var.rca_webhook_url
   }))
 
   root_block_device {

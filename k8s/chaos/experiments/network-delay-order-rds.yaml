@@ -1,0 +1,26 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: drill-network-delay-order-rds
+  namespace: order
+  annotations:
+    drill.bookstore.io/fault-service: rds-mysql
+    drill.bookstore.io/category: dependency-latency
+    drill.bookstore.io/root-cause: "2s added latency on order-service -> RDS (bookstore-db) traffic; order endpoints slow, symptom surfaces as order-service and api-gateway latency"
+    drill.bookstore.io/expected-alerts: "HighLatencyP95"
+    drill.bookstore.io/duration: "8m"
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces: [order]
+    labelSelectors:
+      app: order-service
+  direction: to
+  externalTargets:
+    - "${RDS_ENDPOINT}"
+  delay:
+    latency: "2000ms"
+    jitter: "200ms"
+    correlation: "50"
+  duration: "7m"
