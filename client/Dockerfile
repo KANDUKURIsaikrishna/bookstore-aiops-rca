@@ -14,7 +14,7 @@ ENV REACT_APP_API_URL=$REACT_APP_API_URL
 
 RUN npm run build
 
-FROM nginx:1.27-alpine AS runner
+FROM nginx:1.30-alpine AS runner
 
 RUN apk upgrade --no-cache
 
