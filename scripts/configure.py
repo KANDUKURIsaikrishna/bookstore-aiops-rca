@@ -97,6 +97,16 @@ def main():
     }
     llm_model = cfg.get("LLM_MODEL") or _default_models.get(llm_provider, _default_models["anthropic"])
 
+    # Chaos drills (k8s/chaos/README.md). Off unless config.env turns them on;
+    # written every run so removing a line from config.env really turns it off.
+    def _flag(key):
+        return (cfg.get(key) or "").strip().lower() in ("1", "true", "yes", "on")
+    enable_chaos_mesh = _flag("ENABLE_CHAOS_MESH")
+    enable_chaos_nodes = _flag("ENABLE_CHAOS_NODE_GROUP")
+    chaos_desired = cfg.get("CHAOS_NODE_DESIRED_SIZE") or "0"
+    if not chaos_desired.isdigit():
+        sys.exit(f"\nERROR: CHAOS_NODE_DESIRED_SIZE must be a whole number, got {chaos_desired!r}\n")
+
     print(f"\nConfiguring project with:")
     print(f"  Account    : {account_id}")
     print(f"  Region     : {region}")
@@ -107,6 +117,8 @@ def main():
     print(f"  Alerts     : {alert_email}")
     print(f"  LLM key    : {'(set)' if llm_api_key else '(not set -- RCA narratives skipped until populated)'}")
     print(f"  LLM provider: {llm_provider} ({llm_model})")
+    print(f"  Chaos      : mesh={'on' if enable_chaos_mesh else 'off'}, "
+          f"node group={'on' if enable_chaos_nodes else 'off'} (desired {chaos_desired})")
     print()
 
     # ── 1. terraform/terraform.tfvars ────────────────────────────────────────
@@ -125,7 +137,10 @@ def main():
         f'alert_email      = "{alert_email}"\n'
         f'llm_api_key      = "{llm_api_key}"\n'
         f'llm_provider     = "{llm_provider}"\n'
-        f'claude_model     = "{llm_model}"\n',
+        f'claude_model     = "{llm_model}"\n'
+        f'enable_chaos_mesh       = {str(enable_chaos_mesh).lower()}\n'
+        f'enable_chaos_node_group = {str(enable_chaos_nodes).lower()}\n'
+        f'chaos_node_desired_size = {chaos_desired}\n',
         encoding="utf-8",
     )
     print(f"  [ok]  terraform/terraform.tfvars  (generated)")

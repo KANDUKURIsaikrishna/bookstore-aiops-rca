@@ -29,3 +29,15 @@ variable "secrets_recovery_window_days" {
   default     = 0
 }
 
+
+variable "enable_chaos_mesh" {
+  description = "Install Chaos Mesh (chaos-mesh namespace) for RCA calibration drills. Off by default. Pairs with enable_chaos_node_group, but works without it -- the controller prefers chaos nodes and falls back to app nodes."
+  type        = bool
+  default     = false
+}
+
+variable "chaos_mesh_chart_version" {
+  description = "Pinned Chaos Mesh Helm chart version (https://charts.chaos-mesh.org)."
+  type        = string
+  default     = "2.8.6"
+}

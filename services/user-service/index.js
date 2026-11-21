@@ -1,6 +1,6 @@
 import mysql from "mysql2";
 import dotenv from "dotenv";
-import { createApp, logger } from "./app.js";
+import { createApp, createMetricsApp, logger } from "./app.js";
 
 dotenv.config();
 
@@ -20,4 +20,9 @@ const app = createApp(db, process.env.JWT_SECRET);
 const APP_PORT = process.env.APP_PORT || 3000;
 app.listen(APP_PORT, () => {
   logger.info("startup", { message: `user-service listening on port ${APP_PORT}.` });
+});
+
+const METRICS_PORT = process.env.METRICS_PORT || 9464;
+createMetricsApp().listen(METRICS_PORT, () => {
+  logger.info("startup", { message: `user-service metrics listening on port ${METRICS_PORT}.` });
 });

@@ -95,6 +95,21 @@ const gatewayRateLimiter = rateLimit({
 });
 
 // targets = { catalog: url, user: url, order: url }
+// Dedicated metrics listener (METRICS_PORT, default 9464). Prometheus scrapes
+// through the EKS API-server pod proxy, whose source IPs are the control-plane
+// ENIs in the cluster subnets -- NetworkPolicy opens only this port to them,
+// so the app port stays reachable from api-gateway alone (JWT checks happen
+// there). See docs/TROUBLESHOOTING.md OBS-081.
+export function createMetricsApp() {
+  const app = express();
+  app.disable("x-powered-by");
+  app.get("/metrics", async (_req, res) => {
+    res.set("Content-Type", registry.contentType);
+    res.end(await registry.metrics());
+  });
+  return app;
+}
+
 export function createApp(jwtSecret, targets) {
   const app = express();
   // Behind nginx-ingress/ALB -- without this, req.ip (and anything keyed on

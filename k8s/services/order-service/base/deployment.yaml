@@ -16,7 +16,7 @@ spec:
         app: order-service
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "3000"
+        prometheus.io/port: "9464"
         prometheus.io/path: /metrics
     spec:
       # Spread replicas across AZs first, then nodes. Soft (ScheduleAnyway) so
@@ -51,6 +51,9 @@ spec:
           image: bookstore-order-service:latest
           ports:
             - containerPort: 3000
+              name: http
+            - containerPort: 9464
+              name: metrics
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

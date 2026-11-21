@@ -1,0 +1,12 @@
+# Throwaway namespace for drill workloads pinned to the chaos node group.
+# Applied by scripts/chaos_drill.py on first use; not synced by ArgoCD.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chaos-testing
+  annotations:
+    chaos-mesh.org/inject: enabled
+  labels:
+    name: chaos-testing
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted

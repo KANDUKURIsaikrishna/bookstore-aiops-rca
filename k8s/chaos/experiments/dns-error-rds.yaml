@@ -1,0 +1,26 @@
+# Existing pooled MySQL connections don't re-resolve DNS, so this bites when
+# the pool opens new connections. chaos_drill.py restarts the target
+# Deployment at the start of this drill (drill.bookstore.io/restart-target)
+# so the pool reconnects under the fault.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: DNSChaos
+metadata:
+  name: drill-dns-error-rds-catalog
+  namespace: catalog
+  annotations:
+    drill.bookstore.io/fault-service: rds-mysql
+    drill.bookstore.io/category: dns-failure
+    drill.bookstore.io/root-cause: "DNS resolution of the RDS endpoint fails for catalog-service; DB connections can't be opened, /books returns 500 with db_error"
+    drill.bookstore.io/expected-alerts: "DBErrorsInLogs,HighErrorRate"
+    drill.bookstore.io/duration: "6m"
+    drill.bookstore.io/restart-target: "catalog/catalog-service"
+spec:
+  action: error
+  mode: all
+  patterns:
+    - "${RDS_ENDPOINT}"
+  selector:
+    namespaces: [catalog]
+    labelSelectors:
+      app: catalog-service
+  duration: "5m"

@@ -1,0 +1,22 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: HTTPChaos
+metadata:
+  name: drill-http-delay-user
+  namespace: user
+  annotations:
+    drill.bookstore.io/fault-service: user-service
+    drill.bookstore.io/category: dependency-latency
+    drill.bookstore.io/root-cause: "3s delay injected on user-service /auth responses; login and token refresh slow at api-gateway"
+    drill.bookstore.io/expected-alerts: "HighLatencyP95"
+    drill.bookstore.io/duration: "7m"
+spec:
+  mode: all
+  selector:
+    namespaces: [user]
+    labelSelectors:
+      app: user-service
+  target: Request
+  port: 3000
+  path: /auth*
+  delay: "3s"
+  duration: "6m"
